@@ -1302,7 +1302,24 @@ def build_ai_context(df: pd.DataFrame, max_numeric_cols: int = 6, max_cat_cols: 
     return "\n".join(lines)
 
 
-def ask_openai(question: str, context: str, model: str = "gpt-4o", code_mode: bool = False) -> str:
+def build_multi_sheet_context(workbook: dict, sample_rows: int = 5, max_numeric_cols: int = 6, max_cat_cols: int = 6, max_sheets: int = 20) -> str:
+    """Build compact context for ALL sheets, including sample rows per sheet.
+    Limits number of sheets and per-sheet summaries to keep tokens bounded.
+    """
+    if not workbook:
+        return "No workbook loaded."
+    lines = []
+    lines.append("MULTI-SHEET CONTEXT")
+    for i, (name, df) in enumerate(workbook.items()):
+        if i >= max_sheets:
+            lines.append(f"... {len(workbook) - max_sheets} more sheets omitted ...")
+            break
+        lines.append("")
+        lines.append(f"=== SHEET: {name} ===")
+        lines.append(build_ai_context(df, max_numeric_cols=max_numeric_cols, max_cat_cols=max_cat_cols, sample_rows=sample_rows))
+    return "\n".join(lines)
+
+def ask_openai(question: str, context: str, model: str = "gpt-4o", code_mode: bool = False, multi_df: bool = False) -> str:
     """Ask OpenAI using a chat completion. Expects API key in env or session state.
     If code_mode is True, the assistant should return a single Python fenced code block
     that sets a variable named `result` (and optionally `fig` for Plotly).
@@ -1317,17 +1334,31 @@ def ask_openai(question: str, context: str, model: str = "gpt-4o", code_mode: bo
     try:
         client = OpenAI(api_key=api_key)
         if code_mode:
-            system_prompt = (
-                "You are a helpful data analyst writing Python to analyze a pandas DataFrame named df. "
-                "Use ONLY the provided context to infer column names/types and avoid external I/O or network access. "
-                "Return a single fenced Python code block only (no prose), which: "
-                "1) computes the answer using the DataFrame df, "
-                "2) assigns the main output to a variable named result (DataFrame/Series/scalar), and "
-                "3) optionally assigns a Plotly figure to a variable named fig OR a Matplotlib figure to a variable named mpl_fig. "
-                "Do not import modules. Use provided pd/np/px/plt if needed. "
-                "Do NOT call fig.show() or plt.show(); Streamlit will render the figure. "
-                "Use the variable name df exactly as provided. If using pyplot without explicit figure management, set mpl_fig = plt.gcf() at the end."
-            )
+            if multi_df:
+                system_prompt = (
+                    "You are a helpful data analyst writing Python to analyze multiple pandas DataFrames provided in a dict named dfs. "
+                    "Keys are sheet names (lowercased) and values are DataFrames. A single-sheet DataFrame named df is also provided. "
+                    "Use ONLY the provided context to infer column names/types and avoid external I/O or network access. "
+                    "Return a single fenced Python code block only (no prose), which: "
+                    "1) computes the answer using one or more DataFrames from dfs (and df if helpful), "
+                    "2) assigns the main output to a variable named result (DataFrame/Series/scalar), and "
+                    "3) optionally assigns a Plotly figure to a variable named fig OR a Matplotlib figure to a variable named mpl_fig. "
+                    "Do not import modules. Use provided pd/np/px/plt if needed. "
+                    "Do NOT call fig.show() or plt.show(); Streamlit will render the figure. "
+                    "If using pyplot without explicit figure management, set mpl_fig = plt.gcf() at the end."
+                )
+            else:
+                system_prompt = (
+                    "You are a helpful data analyst writing Python to analyze a pandas DataFrame named df. "
+                    "Use ONLY the provided context to infer column names/types and avoid external I/O or network access. "
+                    "Return a single fenced Python code block only (no prose), which: "
+                    "1) computes the answer using the DataFrame df, "
+                    "2) assigns the main output to a variable named result (DataFrame/Series/scalar), and "
+                    "3) optionally assigns a Plotly figure to a variable named fig OR a Matplotlib figure to a variable named mpl_fig. "
+                    "Do not import modules. Use provided pd/np/px/plt if needed. "
+                    "Do NOT call fig.show() or plt.show(); Streamlit will render the figure. "
+                    "Use the variable name df exactly as provided. If using pyplot without explicit figure management, set mpl_fig = plt.gcf() at the end."
+                )
             user_prompt = (
                 f"Context about df:\n\n{context}\n\n"
                 f"Task: Write Python code to answer the user's question on df. Question: {question}"
@@ -1371,7 +1402,7 @@ def extract_python_code(text: str) -> str:
     return ""
 
 
-def run_user_code(code: str, df: pd.DataFrame):
+def run_user_code(code: str, df: pd.DataFrame, dfs: dict | None = None):
     """Execute user-provided code in a restricted environment.
     Exposes df, pd, np, px, go, plt. Requires code to optionally set `result` and/or
     `fig` (Plotly) or `mpl_fig` (Matplotlib).
@@ -1386,7 +1417,7 @@ def run_user_code(code: str, df: pd.DataFrame):
         '__builtins__': safe_builtins,
         'pd': pd, 'np': np, 'px': px, 'go': go, 'plt': plt,
     }
-    l = {'df': df}
+    l = {'df': df, 'dfs': dfs or {}}
     stdout_buf = io.StringIO()
     try:
         with contextlib.redirect_stdout(stdout_buf):
@@ -1456,6 +1487,55 @@ def build_run_context(question: str, code: str, env: dict, stdout_text: str, err
     lines.append("")
     lines.append(f"FIGURE PRESENT: {fig_present}")
     return "\n".join(lines)
+
+# ---------- Agent fallbacks ----------
+def _fallback_hazard_to_incident_count(workbook: dict) -> dict:
+    try:
+        dfs = {str(k).lower(): v.copy() for k, v in (workbook or {}).items()}
+    except Exception:
+        dfs = {}
+    incidents_df = dfs.get('incident', pd.DataFrame())
+    hazard_df = dfs.get('hazard id', dfs.get('hazard', pd.DataFrame()))
+    rel_key = next((k for k in dfs.keys() if 'relationship' in k), None)
+    rel_df = dfs.get(rel_key) if rel_key else None
+
+    def _find_col(df: pd.DataFrame, tokens, fallback=None):
+        if df is None or df.empty:
+            return None
+        toks = [t.lower() for t in tokens]
+        for c in df.columns:
+            lc = str(c).lower()
+            if all(t in lc for t in toks):
+                return c
+        return fallback if (fallback and fallback in df.columns) else None
+
+    inc_id = _find_col(incidents_df, ['incident','id'], 'incident_id')
+    haz_id = (_find_col(hazard_df, ['hazard','id']) or _find_col(hazard_df, ['id']) or
+              ('incident_id' if (hazard_df is not None and 'incident_id' in getattr(hazard_df, 'columns', [])) else None))
+
+    # Prefer a relationships sheet
+    if rel_df is not None:
+        haz_rel = _find_col(rel_df, ['hazard'])
+        inc_rel = _find_col(rel_df, ['incident'])
+        if haz_rel is not None and inc_rel is not None:
+            haz_ids_rel = pd.Series(rel_df[haz_rel]).dropna().astype(str).unique()
+            if hazard_df is not None and haz_id and haz_id in hazard_df.columns:
+                haz_ids = pd.Series(hazard_df[haz_id]).dropna().astype(str).unique()
+                count = len(set(haz_ids_rel).intersection(haz_ids))
+            else:
+                count = len(haz_ids_rel)
+            sample = rel_df[[haz_rel, inc_rel]].dropna().head(10)
+            return {'count': int(count), 'method': 'relationships', 'sample': sample}
+
+    # Fallback: intersect IDs directly
+    if (incidents_df is not None and not incidents_df.empty and hazard_df is not None and not hazard_df.empty
+            and inc_id and inc_id in incidents_df.columns and haz_id and haz_id in hazard_df.columns):
+        inc_ids = pd.Series(incidents_df[inc_id]).dropna().astype(str).unique()
+        haz_ids = pd.Series(hazard_df[haz_id]).dropna().astype(str).unique()
+        count = len(set(haz_ids).intersection(inc_ids))
+        return {'count': int(count), 'method': 'id_intersection'}
+
+    return {'count': 0, 'method': 'unknown_columns'}
 
 if uploaded_file is not None or use_example:
     # Load workbook (all sheets)
@@ -1986,12 +2066,16 @@ if uploaded_file is not None or use_example:
             sample_rows = st.slider("Sample rows included in context", 3, 10, 5)
             show_ctx = st.checkbox("Show context sent to AI", value=False)
             show_code = st.checkbox("Show generated code", value=True)
+            multi_sheets = st.checkbox("Enable multi-sheet reasoning (use all sheets)", value=True)
             run_agent = st.button("Run HSE Data Agent", type="primary")
 
             if run_agent and question:
                 with st.spinner("Generating analysis code from your question..."):
-                    context_text = build_ai_context(filtered_df, sample_rows=sample_rows)
-                    code_resp = ask_openai(question, context_text, code_mode=True)
+                    if multi_sheets:
+                        context_text = build_multi_sheet_context(workbook, sample_rows=sample_rows)
+                    else:
+                        context_text = build_ai_context(filtered_df, sample_rows=sample_rows)
+                    code_resp = ask_openai(question, context_text, code_mode=True, multi_df=multi_sheets)
                 if show_ctx:
                     with st.expander("Context sent to AI"):
                         st.code(context_text)
@@ -2004,7 +2088,19 @@ if uploaded_file is not None or use_example:
                     st.markdown("### Generated code")
                     st.code(code_block, language="python")
                 with st.spinner("Running code on filtered data..."):
-                    env, stdout_text, err = run_user_code(code_block, filtered_df.copy())
+                    dfs_payload = None
+                    if multi_sheets:
+                        try:
+                            # Provide all sheets as lowercase-name dict for the agent
+                            dfs_payload = {str(k).lower(): v.copy() for k, v in workbook.items()}
+                        except Exception:
+                            dfs_payload = None
+                    env, stdout_text, err = run_user_code(code_block, filtered_df.copy(), dfs=dfs_payload)
+                # If execution failed for a known question, use a guarded fallback
+                if err and ('hazard' in question.lower() and 'incident' in question.lower() and 'how many' in question.lower()):
+                    safe = _fallback_hazard_to_incident_count(workbook)
+                    env['result'] = safe
+                    err = None
                 if err:
                     st.error("Execution failed. See traceback:")
                     st.code(err)
@@ -2181,6 +2277,6 @@ else:
 st.markdown("---")
 st.markdown("""
     <div style='text-align: center'>
-        <p>HSE Analytics Dashboard v1.0 | Built with Streamlit & Plotly</p>
+        <p>HSE Analytics Dashboard v1.0 </p>
     </div>
     """, unsafe_allow_html=True)
