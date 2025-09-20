@@ -285,12 +285,12 @@ def get_sheet_df(workbook: dict, name_contains: str):
 
 # ---------- Advanced analytics chart builders ----------
 def create_unified_hse_scorecard(incident_df, hazard_df, audit_df, inspection_df):
+    """Single-row KPI indicators only. Other charts are shown on subsequent rows."""
     fig = make_subplots(
-        rows=2, cols=4,
-        specs=[[{'type': 'indicator'}, {'type': 'indicator'}, {'type': 'indicator'}, {'type': 'indicator'}],
-               [{'type': 'bar'}, {'type': 'pie'}, {'type': 'scatter'}, {'type': 'box'}]],
-        subplot_titles=['Total Incidents', 'Total Hazards', 'Audits Completed', 'Inspections',
-                       'Monthly Trend', 'Status Distribution', 'Risk vs Cost', 'Resolution Times']
+        rows=1, cols=4,
+        specs=[[{'type': 'indicator'}, {'type': 'indicator'}, {'type': 'indicator'}, {'type': 'indicator'}]],
+        subplot_titles=['Incidents', 'Hazards', 'Audits Completed', 'Inspections'],
+        horizontal_spacing=0.08,
     )
 
     inc_count = len(incident_df) if incident_df is not None else 0
@@ -300,41 +300,18 @@ def create_unified_hse_scorecard(incident_df, hazard_df, audit_df, inspection_df
         audits_completed = (audit_df['audit_status'].astype(str).str.lower() == 'closed').sum()
     insp_count = len(inspection_df) if inspection_df is not None else 0
 
-    fig.add_trace(go.Indicator(mode="number", value=inc_count, title="Incidents"), row=1, col=1)
-    fig.add_trace(go.Indicator(mode="number", value=haz_count, title="Hazards"), row=1, col=2)
-    fig.add_trace(go.Indicator(mode="number", value=audits_completed, title="Audits Completed"), row=1, col=3)
-    fig.add_trace(go.Indicator(mode="number", value=insp_count, title="Inspections"), row=1, col=4)
+    # Indicators with large number display
+    fig.add_trace(go.Indicator(mode="number", value=inc_count, number={'font': {'size': 48}, 'valueformat': ",d"}), row=1, col=1)
+    fig.add_trace(go.Indicator(mode="number", value=haz_count, number={'font': {'size': 48}, 'valueformat': ",d"}), row=1, col=2)
+    fig.add_trace(go.Indicator(mode="number", value=audits_completed, number={'font': {'size': 48}, 'valueformat': ",d"}), row=1, col=3)
+    fig.add_trace(go.Indicator(mode="number", value=insp_count, number={'font': {'size': 48}, 'valueformat': ",d"}), row=1, col=4)
 
-    # Monthly trend from incidents occurrence_date
-    if incident_df is not None and 'occurrence_date' in incident_df.columns:
-        inc = incident_df.copy()
-        inc['_m'] = pd.to_datetime(inc['occurrence_date'], errors='coerce').dt.to_period('M')
-        trend = inc['_m'].value_counts().sort_index()
-        if not trend.empty:
-            fig.add_trace(go.Bar(x=trend.index.astype(str), y=trend.values, name='Incidents'), row=2, col=1)
-
-    # Status distribution (combine available statuses)
-    statuses = []
-    for df, col in [(incident_df, 'status'), (audit_df, 'audit_status'), (inspection_df, 'audit_status')]:
-        if df is not None and col in df.columns:
-            statuses.append(df[col].astype(str))
-    if statuses:
-        status_all = pd.concat(statuses, ignore_index=True)
-        vc = status_all.value_counts()
-        if not vc.empty:
-            fig.add_trace(go.Pie(labels=vc.index, values=vc.values, showlegend=False), row=2, col=2)
-
-    # Risk vs Cost (incidents)
-    if incident_df is not None and 'risk_score' in incident_df.columns and 'estimated_cost_impact' in incident_df.columns:
-        x = pd.to_numeric(incident_df['risk_score'], errors='coerce')
-        y = pd.to_numeric(incident_df['estimated_cost_impact'], errors='coerce')
-        fig.add_trace(go.Scatter(x=x, y=y, mode='markers', marker=dict(size=6, color=x, colorscale='Greens'), name='Risk vs Cost'), row=2, col=3)
-
-    # Resolution times box by status (coerce to days)
-    if incident_df is not None and 'resolution_time_days' in incident_df.columns:
-        fig.add_trace(go.Box(y=_to_days(incident_df['resolution_time_days']), name='Resolution Days', boxmean=True), row=2, col=4)
-
-    fig.update_layout(title="Unified HSE Scorecard")
+    fig.update_layout(
+        title={"text": "Unified HSE Scorecard", "x": 0.01, "xanchor": "left"},
+        height=260,
+        margin=dict(t=50, l=30, r=20, b=20),
+        showlegend=False,
+    )
     return fig
 
 def create_hse_performance_index(df):
@@ -391,6 +368,12 @@ def create_hse_performance_index(df):
         dept_metrics.reset_index(), x='hse_index', y='department', orientation='h',
         color='hse_index', color_continuous_scale=['red','yellow','green'],
         title='HSE Performance Index by Department (0-100)'
+    )
+    # Improve readability: larger height, left margin for long department names
+    fig.update_layout(
+        height=520,
+        margin=dict(t=60, l=160, r=40, b=40),
+        yaxis=dict(automargin=True)
     )
     return fig
 
@@ -1354,17 +1337,18 @@ if uploaded_file is not None or use_example:
             )
 
             if analysis_category == "Executive Overview":
-                col1, col2 = st.columns(2)
-                with col1:
-                    fig1 = create_unified_hse_scorecard(incident_df, hazard_df, audit_df, inspection_df)
-                    st.plotly_chart(fig1, width='stretch')
-                with col2:
-                    # Use incident_df for department index if available; fallback to current filtered_df
-                    base_df = incident_df if incident_df is not None else filtered_df
-                    fig2 = create_hse_performance_index(base_df)
-                    st.plotly_chart(fig2, width='stretch')
+                # Row 1: Full-width unified scorecard
+                fig1 = create_unified_hse_scorecard(incident_df, hazard_df, audit_df, inspection_df)
+                st.plotly_chart(fig1, width='stretch')
 
-                # Incident action funnel (uses incidents + relationships)
+                # Row 2: Full-width HSE Performance Index
+                st.markdown("---")
+                base_df = incident_df if incident_df is not None else filtered_df
+                fig2 = create_hse_performance_index(base_df)
+                st.plotly_chart(fig2, width='stretch')
+
+                # Row 3: Full-width Incident management funnel
+                st.markdown("---")
                 fig3 = create_incident_action_funnel(incident_df, relationships_df)
                 st.plotly_chart(fig3, width='stretch')
 
