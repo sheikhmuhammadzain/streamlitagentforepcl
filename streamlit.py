@@ -13,6 +13,14 @@ import io
 import contextlib
 import traceback
 import matplotlib.pyplot as plt
+from analytics.hazard_incident import render_conversion_page, create_conversion_metrics_card
+try:
+    import folium
+    from folium.plugins import HeatMap, MarkerCluster
+    from streamlit_folium import st_folium
+    FOLIUM_AVAILABLE = True
+except ImportError:
+    FOLIUM_AVAILABLE = False
 try:
     from openai import OpenAI
     _OPENAI_AVAILABLE = True
@@ -607,6 +615,450 @@ def create_cost_prediction_analysis(df):
     fig.update_layout(title='Cost Impact Analysis')
     return fig
 
+# ---------- Heatmap functions ----------
+# Facility layout coordinates for heatmap visualization
+FACILITY_ZONES = {
+    'Admin Building': {'x': 1, 'y': 5, 'area': 'Administration'},
+    'EVCM 200': {'x': 2, 'y': 4, 'area': 'EDC/VCM'},
+    'EVCM 300': {'x': 3, 'y': 4, 'area': 'EDC/VCM'},
+    'PVC I Front End': {'x': 4, 'y': 3, 'area': 'PVC'},
+    'PVC III Feedstock': {'x': 5, 'y': 3, 'area': 'PVC'},
+    'HPO': {'x': 2, 'y': 2, 'area': 'HPO'},
+    'HPO Process Area': {'x': 3, 'y': 2, 'area': 'HPO'},
+    'HTDC': {'x': 4, 'y': 1, 'area': 'HTDC'},
+    'CA-1650 and HCL Loading': {'x': 5, 'y': 1, 'area': 'Chlor Alkali'},
+    'Container Offices': {'x': 1, 'y': 4, 'area': 'Administration'},
+    'Manufacturing Facility': {'x': 3, 'y': 3, 'area': 'Main'},
+    'Karachi': {'x': 3, 'y': 3, 'area': 'Main'},  # Default location
+}
+
+# GPS coordinates for geographical mapping (example coordinates around Karachi)
+LOCATION_COORDINATES = {
+    'Karachi': {'lat': 24.8607, 'lon': 67.0011},
+    'Manufacturing Facility': {'lat': 24.8607, 'lon': 67.0011},
+    'EVCM 200': {'lat': 24.8610, 'lon': 67.0015},
+    'EVCM 300': {'lat': 24.8612, 'lon': 67.0018},
+    'PVC I Front End': {'lat': 24.8608, 'lon': 67.0020},
+    'PVC III Feedstock': {'lat': 24.8605, 'lon': 67.0022},
+    'HPO': {'lat': 24.8603, 'lon': 67.0025},
+    'HPO Process Area': {'lat': 24.8602, 'lon': 67.0027},
+    'HTDC': {'lat': 24.8600, 'lon': 67.0030},
+    'CA-1650 and HCL Loading': {'lat': 24.8598, 'lon': 67.0032},
+    'Admin Building': {'lat': 24.8615, 'lon': 67.0010},
+    'Container Offices': {'lat': 24.8613, 'lon': 67.0008},
+}
+
+def add_coordinates_to_df(df):
+    """Add lat/lon coordinates to dataframe based on location columns"""
+    df = df.copy()
+    df['latitude'] = None
+    df['longitude'] = None
+
+    # Try to match locations in order of specificity
+    for idx, row in df.iterrows():
+        # Try location.1 first (most specific)
+        if 'location.1' in df.columns and pd.notna(row.get('location.1')):
+            loc = str(row['location.1'])
+            if loc in LOCATION_COORDINATES:
+                df.at[idx, 'latitude'] = LOCATION_COORDINATES[loc]['lat']
+                df.at[idx, 'longitude'] = LOCATION_COORDINATES[loc]['lon']
+                continue
+
+        # Try sublocation
+        if 'sublocation' in df.columns and pd.notna(row.get('sublocation')):
+            loc = str(row['sublocation'])
+            if loc in LOCATION_COORDINATES:
+                df.at[idx, 'latitude'] = LOCATION_COORDINATES[loc]['lat']
+                df.at[idx, 'longitude'] = LOCATION_COORDINATES[loc]['lon']
+                continue
+
+        # Try main location
+        if 'location' in df.columns and pd.notna(row.get('location')):
+            loc = str(row['location'])
+            if loc in LOCATION_COORDINATES:
+                df.at[idx, 'latitude'] = LOCATION_COORDINATES[loc]['lat']
+                df.at[idx, 'longitude'] = LOCATION_COORDINATES[loc]['lon']
+
+    # Add small random jitter to prevent exact overlaps
+    coords_mask = df['latitude'].notna()
+    if coords_mask.any():
+        df.loc[coords_mask, 'latitude'] = df.loc[coords_mask, 'latitude'] + np.random.normal(0, 0.0001, coords_mask.sum())
+        df.loc[coords_mask, 'longitude'] = df.loc[coords_mask, 'longitude'] + np.random.normal(0, 0.0001, coords_mask.sum())
+
+    return df
+
+def create_facility_layout_heatmap(incident_df, hazard_df):
+    """Create an interactive facility layout heatmap using Plotly"""
+
+    # Create heatmap data for incidents and hazards
+    incident_heatmap = create_zone_heatmap_data(incident_df, FACILITY_ZONES, 'Incidents')
+    hazard_heatmap = create_zone_heatmap_data(hazard_df, FACILITY_ZONES, 'Hazards')
+
+    # Create subplots
+    fig = make_subplots(
+        rows=1, cols=2,
+        subplot_titles=('🔴 Incident Heat Map', '⚠️ Hazard Heat Map'),
+        specs=[[{'type': 'scatter'}, {'type': 'scatter'}]],
+        horizontal_spacing=0.15
+    )
+
+    # Add incident heatmap
+    fig.add_trace(
+        go.Scatter(
+            x=incident_heatmap['x'],
+            y=incident_heatmap['y'],
+            mode='markers+text',
+            marker=dict(
+                size=incident_heatmap['size'],
+                color=incident_heatmap['intensity'],
+                colorscale='Reds',
+                showscale=True,
+                colorbar=dict(x=0.45, title='Incidents', len=0.8),
+                line=dict(width=2, color='darkred'),
+                sizemode='diameter',
+                sizeref=2,
+                sizemin=20
+            ),
+            text=incident_heatmap['text'],
+            textposition='middle center',
+            textfont=dict(color='white', size=10, family='Arial Black'),
+            hovertemplate='<b>%{hovertext}</b><br>Count: %{marker.color}<extra></extra>',
+            hovertext=incident_heatmap['hover'],
+            showlegend=False
+        ),
+        row=1, col=1
+    )
+
+    # Add hazard heatmap
+    fig.add_trace(
+        go.Scatter(
+            x=hazard_heatmap['x'],
+            y=hazard_heatmap['y'],
+            mode='markers+text',
+            marker=dict(
+                size=hazard_heatmap['size'],
+                color=hazard_heatmap['intensity'],
+                colorscale='YlOrRd',
+                showscale=True,
+                colorbar=dict(x=1.0, title='Hazards', len=0.8),
+                line=dict(width=2, color='darkorange'),
+                sizemode='diameter',
+                sizeref=2,
+                sizemin=20
+            ),
+            text=hazard_heatmap['text'],
+            textposition='middle center',
+            textfont=dict(color='white', size=10, family='Arial Black'),
+            hovertemplate='<b>%{hovertext}</b><br>Count: %{marker.color}<extra></extra>',
+            hovertext=hazard_heatmap['hover'],
+            showlegend=False
+        ),
+        row=1, col=2
+    )
+
+    # Update layout for facility appearance
+    fig.update_xaxes(
+        showgrid=True, gridwidth=1, gridcolor='LightGray',
+        zeroline=False, showticklabels=False,
+        range=[0, 6], title='',
+        row=1, col=1
+    )
+    fig.update_xaxes(
+        showgrid=True, gridwidth=1, gridcolor='LightGray',
+        zeroline=False, showticklabels=False,
+        range=[0, 6], title='',
+        row=1, col=2
+    )
+
+    fig.update_yaxes(
+        showgrid=True, gridwidth=1, gridcolor='LightGray',
+        zeroline=False, showticklabels=False,
+        range=[0, 6], title='',
+        row=1, col=1
+    )
+    fig.update_yaxes(
+        showgrid=True, gridwidth=1, gridcolor='LightGray',
+        zeroline=False, showticklabels=False,
+        range=[0, 6], title='',
+        row=1, col=2
+    )
+
+    fig.update_layout(
+        height=500,
+        title_text="🏭 Facility Risk Heat Map - Real-time HSE Status",
+        title_font_size=16,
+        showlegend=False,
+        plot_bgcolor='#f8f9fa',
+        paper_bgcolor='white',
+        margin=dict(t=60, l=20, r=20, b=20)
+    )
+
+    return fig
+
+def create_zone_heatmap_data(df, zones, data_type):
+    """Process dataframe to create zone-based heatmap data"""
+    zone_counts = {}
+
+    # Initialize all zones
+    for zone_name, zone_info in zones.items():
+        zone_counts[zone_name] = {
+            'count': 0,
+            'severity_sum': 0,
+            'risk_sum': 0,
+            'x': zone_info['x'],
+            'y': zone_info['y'],
+            'area': zone_info['area']
+        }
+
+    # Count events per zone
+    for zone_name in zones.keys():
+        count = 0
+        severity_sum = 0
+        risk_sum = 0
+
+        # Check all location columns
+        for col in ['location.1', 'sublocation', 'location']:
+            if col in df.columns:
+                # Case-insensitive partial matching
+                matches = df[df[col].astype(str).str.contains(zone_name, case=False, na=False)]
+                count += len(matches)
+                if 'severity_score' in df.columns:
+                    severity_sum += matches['severity_score'].sum()
+                if 'risk_score' in df.columns:
+                    risk_sum += matches['risk_score'].sum()
+
+        zone_counts[zone_name]['count'] = count
+        zone_counts[zone_name]['severity_sum'] = severity_sum
+        zone_counts[zone_name]['risk_sum'] = risk_sum
+
+    # Prepare data for plotting
+    x, y, intensity, size, text, hover = [], [], [], [], [], []
+
+    for zone_name, data in zone_counts.items():
+        x.append(data['x'])
+        y.append(data['y'])
+        intensity.append(data['count'])
+        # Size based on count (minimum size 30)
+        size.append(max(30, min(100, data['count'] * 8 + 20)))
+        text.append(f"{data['count']}" if data['count'] > 0 else "")
+        avg_severity = data['severity_sum'] / data['count'] if data['count'] > 0 else 0
+        avg_risk = data['risk_sum'] / data['count'] if data['count'] > 0 else 0
+        hover.append(f"{zone_name}<br>Area: {data['area']}<br>{data_type}: {data['count']}<br>Avg Severity: {avg_severity:.1f}<br>Avg Risk: {avg_risk:.1f}")
+
+    return {
+        'x': x, 'y': y, 'intensity': intensity,
+        'size': size, 'text': text, 'hover': hover
+    }
+
+def create_folium_heatmap(df, map_title, color_gradient):
+    """Create a Folium heatmap with custom styling"""
+
+    # Filter out rows without coordinates
+    df_coords = df.dropna(subset=['latitude', 'longitude'])
+    if df_coords.empty:
+        # Return empty map if no coordinates
+        m = folium.Map(location=[24.8607, 67.0011], zoom_start=13, tiles='CartoDB dark_matter')
+        folium.Marker([24.8607, 67.0011], popup="No location data available").add_to(m)
+        return m
+
+    # Get center coordinates
+    center_lat = df_coords['latitude'].mean()
+    center_lon = df_coords['longitude'].mean()
+
+    # Create base map with dark theme (similar to Snapchat)
+    m = folium.Map(
+        location=[center_lat, center_lon],
+        zoom_start=15,
+        tiles='CartoDB dark_matter',  # Dark theme like Snapchat
+        control_scale=True
+    )
+
+    # Prepare data for heatmap
+    heat_data = []
+    for idx, row in df_coords.iterrows():
+        # Weight by severity/risk if available
+        weight = 1.0
+        if 'severity_score' in df.columns and pd.notna(row['severity_score']):
+            weight = float(row['severity_score']) / 5.0  # Normalize to 0-1
+        elif 'risk_score' in df.columns and pd.notna(row['risk_score']):
+            weight = float(row['risk_score']) / 5.0
+
+        heat_data.append([row['latitude'], row['longitude'], weight])
+
+    # Add heatmap layer
+    if heat_data:
+        HeatMap(
+            heat_data,
+            min_opacity=0.3,
+            max_zoom=18,
+            radius=25,
+            blur=20,
+            gradient=color_gradient,
+            overlay=True,
+            control=True,
+            show=True
+        ).add_to(m)
+
+    # Add marker clusters for detailed view
+    marker_cluster = MarkerCluster(name='Event Details').add_to(m)
+
+    for idx, row in df_coords.iterrows():
+        # Create popup text
+        popup_text = f"""
+        <div style='width: 200px'>
+            <b>Location:</b> {row.get('location.1', row.get('sublocation', 'Unknown'))}<br>
+            <b>Date:</b> {row.get('occurrence_date', 'N/A')}<br>
+            <b>Status:</b> {row.get('status', 'N/A')}<br>
+            <b>Severity:</b> {row.get('severity_score', 'N/A')}<br>
+            <b>Risk:</b> {row.get('risk_score', 'N/A')}<br>
+            <b>Title:</b> {str(row.get('title', 'N/A'))[:50]}...
+        </div>
+        """
+
+        # Color based on severity
+        severity = row.get('severity_score', 1)
+        if severity >= 4:
+            icon_color = 'red'
+        elif severity >= 3:
+            icon_color = 'orange'
+        elif severity >= 2:
+            icon_color = 'yellow'
+        else:
+            icon_color = 'green'
+
+        folium.Marker(
+            location=[row['latitude'], row['longitude']],
+            popup=folium.Popup(popup_text, max_width=300),
+            icon=folium.Icon(color=icon_color, icon='warning', prefix='fa'),
+        ).add_to(marker_cluster)
+
+    # Add title
+    title_html = f'''
+    <h3 align="center" style="font-size:20px; color: white; background-color: rgba(0,0,0,0.6); padding: 10px; border-radius: 5px;">
+        <b>{map_title} Heat Map</b>
+    </h3>
+    '''
+    m.get_root().html.add_child(folium.Element(title_html))
+
+    # Add fullscreen button
+    folium.plugins.Fullscreen().add_to(m)
+
+    # Add layer control
+    folium.LayerControl().add_to(m)
+
+    return m
+
+def create_incident_hazard_heatmaps(incident_df, hazard_df):
+    """Create side-by-side heatmaps for incidents and hazards"""
+
+    # Add coordinates
+    incident_df = add_coordinates_to_df(incident_df)
+    hazard_df = add_coordinates_to_df(hazard_df)
+
+    # Create two columns in Streamlit
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.subheader("🔴 Incident Heatmap")
+        incident_map = create_folium_heatmap(
+            incident_df,
+            'Incidents',
+            color_gradient={0.0: 'blue', 0.5: 'yellow', 0.75: 'orange', 1.0: 'red'}
+        )
+        if FOLIUM_AVAILABLE:
+            st_folium(incident_map, key="incident_map", width=700, height=500)
+        else:
+            st.error("Folium not installed. Install with: pip install folium streamlit-folium")
+
+        # Statistics
+        incident_coords = incident_df.dropna(subset=['latitude', 'longitude'])
+        st.metric("Total Incidents", len(incident_coords))
+        top_location = incident_df['location.1'].value_counts().head(1)
+        if not top_location.empty:
+            st.metric("Hottest Zone", top_location.index[0], f"{top_location.values[0]} incidents")
+
+    with col2:
+        st.subheader("⚠️ Hazard Heatmap")
+        hazard_map = create_folium_heatmap(
+            hazard_df,
+            'Hazards',
+            color_gradient={0.0: 'green', 0.5: 'yellow', 0.75: 'orange', 1.0: 'darkred'}
+        )
+        if FOLIUM_AVAILABLE:
+            st_folium(hazard_map, key="hazard_map", width=700, height=500)
+        else:
+            st.error("Folium not installed. Install with: pip install folium streamlit-folium")
+
+        # Statistics
+        hazard_coords = hazard_df.dropna(subset=['latitude', 'longitude'])
+        st.metric("Total Hazards", len(hazard_coords))
+        top_location = hazard_df['location.1'].value_counts().head(1)
+        if not top_location.empty:
+            st.metric("Highest Risk Zone", top_location.index[0], f"{top_location.values[0]} hazards")
+
+def create_3d_facility_heatmap(df, event_type='Incidents'):
+    """Create a 3D surface heatmap of the facility"""
+
+    # Create a grid representing the facility
+    x = np.linspace(0, 10, 50)
+    y = np.linspace(0, 10, 50)
+    X, Y = np.meshgrid(x, y)
+
+    # Initialize Z values (intensity)
+    Z = np.zeros_like(X)
+
+    # Define zone centers and add Gaussian peaks for each event
+    zone_centers = {
+        'EVCM': (3, 7),
+        'PVC': (7, 7),
+        'HPO': (3, 3),
+        'HTDC': (7, 3),
+        'Admin': (1, 8),
+        'Default': (5, 5)
+    }
+
+    for idx, row in df.iterrows():
+        # Get location coordinates
+        loc = str(row.get('location.1', row.get('sublocation', '')))
+
+        # Find matching zone center
+        cx, cy = zone_centers['Default']
+        for zone_key, coords in zone_centers.items():
+            if zone_key.lower() in loc.lower():
+                cx, cy = coords
+                break
+
+        # Add Gaussian peak for this event
+        severity = row.get('severity_score', row.get('risk_score', 1))
+        if pd.notna(severity):
+            Z += severity * np.exp(-((X - cx)**2 + (Y - cy)**2) / 2)
+
+    # Create 3D surface plot
+    fig = go.Figure(data=[go.Surface(
+        x=X, y=Y, z=Z,
+        colorscale='Hot',
+        name=event_type,
+        showscale=True,
+        colorbar=dict(title=f"{event_type} Intensity"),
+        contours=dict(
+            z=dict(show=True, usecolormap=True, highlightcolor="limegreen", project=dict(z=True))
+        )
+    )])
+
+    fig.update_layout(
+        title=f'3D {event_type} Heat Map - Facility Risk Visualization',
+        scene=dict(
+            xaxis_title='Facility Width',
+            yaxis_title='Facility Length',
+            zaxis_title='Risk Intensity',
+            camera=dict(eye=dict(x=1.5, y=1.5, z=1.5))
+        ),
+        height=600,
+        margin=dict(t=40, l=20, r=20, b=20)
+    )
+
+    return fig
+
 # ---------- AI helpers ----------
 def build_ai_context(df: pd.DataFrame, max_numeric_cols: int = 6, max_cat_cols: int = 6, sample_rows: int = 5) -> str:
     """Build a concise text context describing the filtered dataframe.
@@ -886,8 +1338,8 @@ if uploaded_file is not None or use_example:
         # Apply filters
         filtered_df = apply_filters(df, schema, date_range, statuses, departments, locations, categories)
 
-        # Tabs (added Overall across-sheets view + Advanced Analytics)
-        tab0, tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+        # Tabs (added Overall across-sheets view + Advanced Analytics + Hazard-Incident Analysis)
+        tab0, tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
             "🌐 Overall",
             "📊 Overview",
             "🔎 Deep Dive",
@@ -895,11 +1347,22 @@ if uploaded_file is not None or use_example:
             "📑 Summary Report",
             "🧠 HSE Data Agent",
             "🚀 Advanced Analytics",
+            "🔄 Hazard-Incident Analysis",
         ])
 
         # Tab 0: Overall (across all sheets)
         with tab0:
-            st.subheader("Overall – Incidents vs Hazards vs Relationships")
+            st.subheader("🌐 Overall – Incidents vs Hazards vs Relationships")
+
+            # Heatmap visualization type selector
+            st.markdown("### 🗺️ Real-time Risk Heat Maps")
+            heatmap_type = st.radio(
+                "Select Heat Map Type:",
+                ["Facility Layout (2D)", "Geographical Map", "3D Surface"],
+                horizontal=True,
+                label_visibility="collapsed"
+            )
+
             # Detect sheets by keyword
             hazard_sheet = next((s for s in sheet_names if 'hazard' in s.lower()), None)
             incident_sheet = next((s for s in sheet_names if 'incident' in s.lower()), None)
@@ -927,6 +1390,55 @@ if uploaded_file is not None or use_example:
                 if inc_rel_col:
                     rel_inc_nunique = df_rel[inc_rel_col].nunique(dropna=True)
 
+            # Display selected heatmap
+            if heatmap_type == "Facility Layout (2D)":
+                if df_inc is not None and df_haz is not None:
+                    fig_heatmap = create_facility_layout_heatmap(df_inc, df_haz)
+                    st.plotly_chart(fig_heatmap, use_container_width=True)
+                elif df_inc is not None:
+                    fig_heatmap = create_facility_layout_heatmap(df_inc, pd.DataFrame())
+                    st.plotly_chart(fig_heatmap, use_container_width=True)
+                elif df_haz is not None:
+                    fig_heatmap = create_facility_layout_heatmap(pd.DataFrame(), df_haz)
+                    st.plotly_chart(fig_heatmap, use_container_width=True)
+                else:
+                    st.info("No incident or hazard data available for heatmap visualization.")
+
+            elif heatmap_type == "Geographical Map":
+                if df_inc is not None and df_haz is not None:
+                    create_incident_hazard_heatmaps(df_inc, df_haz)
+                elif df_inc is not None:
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        create_incident_hazard_heatmaps(df_inc, pd.DataFrame())
+                    with col2:
+                        st.info("No hazard data available")
+                elif df_haz is not None:
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.info("No incident data available")
+                    with col2:
+                        create_incident_hazard_heatmaps(pd.DataFrame(), df_haz)
+                else:
+                    st.info("No incident or hazard data available for geographical mapping.")
+
+            elif heatmap_type == "3D Surface":
+                col1, col2 = st.columns(2)
+                with col1:
+                    if df_inc is not None and len(df_inc) > 0:
+                        fig_3d_inc = create_3d_facility_heatmap(df_inc, 'Incidents')
+                        st.plotly_chart(fig_3d_inc, use_container_width=True)
+                    else:
+                        st.info("No incident data available for 3D visualization.")
+                with col2:
+                    if df_haz is not None and len(df_haz) > 0:
+                        fig_3d_haz = create_3d_facility_heatmap(df_haz, 'Hazards')
+                        st.plotly_chart(fig_3d_haz, use_container_width=True)
+                    else:
+                        st.info("No hazard data available for 3D visualization.")
+
+            st.markdown("---")
+
             # Metrics row
             c1, c2, c3, c4, c5 = st.columns(5)
             with c1:
@@ -951,8 +1463,15 @@ if uploaded_file is not None or use_example:
             fig_overall.update_layout(height=360)
             st.plotly_chart(fig_overall, width='stretch')
 
+            # Prevention gauge (modular metric)
+            try:
+                gauge_fig = create_conversion_metrics_card(workbook)
+                st.plotly_chart(gauge_fig, use_container_width=True)
+            except Exception:
+                pass
+
             # Linked vs Unlinked (stacked) using Relationships sheet
-            st.subheader("Linked vs Unlinked")
+            st.subheader("🔗 Linked vs Unlinked Analysis")
             stacked_rows = []
 
             # Identify id columns in Hazard and Incident sheets
@@ -1012,6 +1531,33 @@ if uploaded_file is not None or use_example:
                 st.plotly_chart(fig_stack, width='stretch')
             else:
                 st.info("No sufficient ID columns detected to compute linked vs unlinked.")
+
+            # 🔥 Hottest Zones Summary
+            if df_inc is not None or df_haz is not None:
+                st.markdown("### 🔥 Hottest Risk Zones")
+                col1, col2 = st.columns(2)
+
+                with col1:
+                    st.markdown("**Top Incident Areas:**")
+                    if df_inc is not None and 'location.1' in df_inc.columns:
+                        top_incident_areas = df_inc['location.1'].value_counts().head(5)
+                        for area, count in top_incident_areas.items():
+                            severity_avg = df_inc[df_inc['location.1'] == area]['severity_score'].mean()
+                            color = "🔴" if severity_avg >= 3 else "🟡" if severity_avg >= 2 else "🟢"
+                            st.write(f"{color} **{area}**: {count} incidents (Avg Severity: {severity_avg:.1f})")
+                    else:
+                        st.write("No location data available")
+
+                with col2:
+                    st.markdown("**Top Hazard Areas:**")
+                    if df_haz is not None and 'location.1' in df_haz.columns:
+                        top_hazard_areas = df_haz['location.1'].value_counts().head(5)
+                        for area, count in top_hazard_areas.items():
+                            risk_avg = df_haz[df_haz['location.1'] == area]['risk_score'].mean()
+                            color = "🔴" if risk_avg >= 3 else "🟡" if risk_avg >= 2 else "🟢"
+                            st.write(f"{color} **{area}**: {count} hazards (Avg Risk: {risk_avg:.1f})")
+                    else:
+                        st.write("No location data available")
 
         # Tab 1: Overview
         with tab1:
@@ -1413,6 +1959,11 @@ if uploaded_file is not None or use_example:
             elif analysis_category == "Hazard Violation Analysis":
                 fig_vi = create_violation_analysis(hazard_df)
                 st.plotly_chart(fig_vi, width='stretch')
+
+        # Tab 7: Hazard-Incident Analysis (modular)
+        with tab7:
+            st.header("🔄 Hazard-Incident Analysis")
+            render_conversion_page(workbook)
 
     else:
         st.error("Failed to load workbook. Please upload a valid .xlsx or place 'EPCL_VEHS_Data_Processed.xlsx' alongside this app.")
