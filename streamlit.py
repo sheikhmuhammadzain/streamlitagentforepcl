@@ -14,9 +14,11 @@ import contextlib
 import traceback
 import matplotlib.pyplot as plt
 from analytics.hazard_incident import render_conversion_page, create_conversion_metrics_card
+from analytics.maps import add_coordinates_to_df as maps_add_coords, build_combined_map_html
+import streamlit.components.v1 as components
 try:
     import folium
-    from folium.plugins import HeatMap, MarkerCluster
+    from folium.plugins import HeatMap, MarkerCluster, MiniMap, Fullscreen, MousePosition, MeasureControl
     from streamlit_folium import st_folium
     FOLIUM_AVAILABLE = True
 except ImportError:
@@ -649,41 +651,50 @@ LOCATION_COORDINATES = {
 }
 
 def add_coordinates_to_df(df):
-    """Add lat/lon coordinates to dataframe based on location columns"""
+    """Add lat/lon coordinates to dataframe based on location columns (vectorized)."""
+    if df is None or len(df) == 0:
+        return df
     df = df.copy()
-    df['latitude'] = None
-    df['longitude'] = None
 
-    # Try to match locations in order of specificity
-    for idx, row in df.iterrows():
-        # Try location.1 first (most specific)
-        if 'location.1' in df.columns and pd.notna(row.get('location.1')):
-            loc = str(row['location.1'])
-            if loc in LOCATION_COORDINATES:
-                df.at[idx, 'latitude'] = LOCATION_COORDINATES[loc]['lat']
-                df.at[idx, 'longitude'] = LOCATION_COORDINATES[loc]['lon']
-                continue
+    # Build mapping functions
+    def map_series(series, key):
+        return series.astype(str).map(lambda v: LOCATION_COORDINATES.get(v, {}).get(key) if pd.notna(v) else None)
 
-        # Try sublocation
-        if 'sublocation' in df.columns and pd.notna(row.get('sublocation')):
-            loc = str(row['sublocation'])
-            if loc in LOCATION_COORDINATES:
-                df.at[idx, 'latitude'] = LOCATION_COORDINATES[loc]['lat']
-                df.at[idx, 'longitude'] = LOCATION_COORDINATES[loc]['lon']
-                continue
+    lat = pd.Series(pd.NA, index=df.index)
+    lon = pd.Series(pd.NA, index=df.index)
 
-        # Try main location
-        if 'location' in df.columns and pd.notna(row.get('location')):
-            loc = str(row['location'])
-            if loc in LOCATION_COORDINATES:
-                df.at[idx, 'latitude'] = LOCATION_COORDINATES[loc]['lat']
-                df.at[idx, 'longitude'] = LOCATION_COORDINATES[loc]['lon']
+    if 'location.1' in df.columns:
+        lat = map_series(df['location.1'], 'lat')
+        lon = map_series(df['location.1'], 'lon')
+    if 'sublocation' in df.columns:
+        lat = lat.fillna(map_series(df['sublocation'], 'lat'))
+        lon = lon.fillna(map_series(df['sublocation'], 'lon'))
+    if 'location' in df.columns:
+        lat = lat.fillna(map_series(df['location'], 'lat'))
+        lon = lon.fillna(map_series(df['location'], 'lon'))
 
-    # Add small random jitter to prevent exact overlaps
-    coords_mask = df['latitude'].notna()
+    df['latitude'] = lat
+    df['longitude'] = lon
+
+    # Deterministic jitter only where we have coordinates (prevents re-runs from changing data)
+    coords_mask = df['latitude'].notna() & df['longitude'].notna()
     if coords_mask.any():
-        df.loc[coords_mask, 'latitude'] = df.loc[coords_mask, 'latitude'] + np.random.normal(0, 0.0001, coords_mask.sum())
-        df.loc[coords_mask, 'longitude'] = df.loc[coords_mask, 'longitude'] + np.random.normal(0, 0.0001, coords_mask.sum())
+        # Build a stable key for hashing
+        if 'incident_id' in df.columns:
+            key_series = df['incident_id'].astype(str)
+        elif 'title' in df.columns:
+            key_series = df['title'].astype(str)
+        elif 'location.1' in df.columns:
+            key_series = df['location.1'].astype(str)
+        elif 'location' in df.columns:
+            key_series = df['location'].astype(str)
+        else:
+            key_series = pd.Series(df.index.astype(str), index=df.index)
+        h = pd.util.hash_pandas_object(key_series, index=False).astype(np.uint32)
+        lat_j = ((h % 1000) / 1000.0 - 0.5) * 0.00008
+        lon_j = (((h // 1000) % 1000) / 1000.0 - 0.5) * 0.00008
+        df.loc[coords_mask, 'latitude'] = df.loc[coords_mask, 'latitude'].astype(float) + lat_j[coords_mask].values
+        df.loc[coords_mask, 'longitude'] = df.loc[coords_mask, 'longitude'].astype(float) + lon_j[coords_mask].values
 
     return df
 
@@ -850,11 +861,14 @@ def create_zone_heatmap_data(df, zones, data_type):
         'size': size, 'text': text, 'hover': hover
     }
 
-def create_folium_heatmap(df, map_title, color_gradient):
-    """Create a Folium heatmap with custom styling"""
+def create_folium_heatmap(df, map_title, color_gradient, max_points: int = 5000):
+    """Create a Folium heatmap with custom styling. Optionally subsample for speed."""
 
     # Filter out rows without coordinates
     df_coords = df.dropna(subset=['latitude', 'longitude'])
+    # Subsample to avoid huge heatmaps
+    if len(df_coords) > max_points:
+        df_coords = df_coords.sample(max_points, random_state=42)
     if df_coords.empty:
         # Return empty map if no coordinates
         m = folium.Map(location=[24.8607, 67.0011], zoom_start=13, tiles='CartoDB dark_matter')
@@ -874,16 +888,15 @@ def create_folium_heatmap(df, map_title, color_gradient):
     )
 
     # Prepare data for heatmap
-    heat_data = []
-    for idx, row in df_coords.iterrows():
-        # Weight by severity/risk if available
-        weight = 1.0
-        if 'severity_score' in df.columns and pd.notna(row['severity_score']):
-            weight = float(row['severity_score']) / 5.0  # Normalize to 0-1
-        elif 'risk_score' in df.columns and pd.notna(row['risk_score']):
-            weight = float(row['risk_score']) / 5.0
-
-        heat_data.append([row['latitude'], row['longitude'], weight])
+    # Vectorized weight computation
+    weight = pd.Series(1.0, index=df_coords.index)
+    if 'severity_score' in df_coords.columns:
+        w = pd.to_numeric(df_coords['severity_score'], errors='coerce') / 5.0
+        weight = w.fillna(weight)
+    elif 'risk_score' in df_coords.columns:
+        w = pd.to_numeric(df_coords['risk_score'], errors='coerce') / 5.0
+        weight = w.fillna(weight)
+    heat_data = list(zip(df_coords['latitude'].astype(float), df_coords['longitude'].astype(float), weight.astype(float)))
 
     # Add heatmap layer
     if heat_data:
@@ -902,7 +915,7 @@ def create_folium_heatmap(df, map_title, color_gradient):
     # Add marker clusters for detailed view
     marker_cluster = MarkerCluster(name='Event Details').add_to(m)
 
-    for idx, row in df_coords.iterrows():
+    for idx, row in df_coords.head(2000).iterrows():
         # Create popup text
         popup_text = f"""
         <div style='width: 200px'>
@@ -949,52 +962,125 @@ def create_folium_heatmap(df, map_title, color_gradient):
     return m
 
 def create_incident_hazard_heatmaps(incident_df, hazard_df):
-    """Create side-by-side heatmaps for incidents and hazards"""
+    """Create a single combined Folium map with both incident and hazard heat layers."""
 
     # Add coordinates
-    incident_df = add_coordinates_to_df(incident_df)
-    hazard_df = add_coordinates_to_df(hazard_df)
+    incident_df = add_coordinates_to_df(incident_df if incident_df is not None else pd.DataFrame())
+    hazard_df = add_coordinates_to_df(hazard_df if hazard_df is not None else pd.DataFrame())
 
-    # Create two columns in Streamlit
+    # Filter coords
+    inc_coords = incident_df.dropna(subset=['latitude', 'longitude']) if not incident_df.empty else pd.DataFrame()
+    haz_coords = hazard_df.dropna(subset=['latitude', 'longitude']) if not hazard_df.empty else pd.DataFrame()
+
+    # Determine center
+    if not inc_coords.empty:
+        center_lat = inc_coords['latitude'].astype(float).mean()
+        center_lon = inc_coords['longitude'].astype(float).mean()
+    elif not haz_coords.empty:
+        center_lat = haz_coords['latitude'].astype(float).mean()
+        center_lon = haz_coords['longitude'].astype(float).mean()
+    else:
+        center_lat, center_lon = 24.8607, 67.0011
+
+    # Create base map
+    if FOLIUM_AVAILABLE:
+        m = folium.Map(location=[center_lat, center_lon], zoom_start=15, tiles='CartoDB dark_matter', control_scale=True, prefer_canvas=True)
+    else:
+        st.error("Folium not installed. Install with: pip install folium streamlit-folium")
+        return
+
+    # Heat layer for incidents
+    if not inc_coords.empty:
+        weight_inc = pd.Series(1.0, index=inc_coords.index)
+        if 'severity_score' in inc_coords.columns:
+            w = pd.to_numeric(inc_coords['severity_score'], errors='coerce') / 5.0
+            weight_inc = w.fillna(weight_inc)
+        elif 'risk_score' in inc_coords.columns:
+            w = pd.to_numeric(inc_coords['risk_score'], errors='coerce') / 5.0
+            weight_inc = w.fillna(weight_inc)
+        if len(inc_coords) > 3000:
+            inc_coords = inc_coords.sample(3000, random_state=42)
+            weight_inc = weight_inc.loc[inc_coords.index]
+        inc_heat = list(zip(inc_coords['latitude'].astype(float), inc_coords['longitude'].astype(float), weight_inc.astype(float)))
+        HeatMap(inc_heat, name='Incidents Heat', min_opacity=0.2, max_zoom=18, radius=16, blur=10, gradient={0.0: 'blue', 0.5: 'yellow', 0.75: 'orange', 1.0: 'red'}).add_to(m)
+
+    # Heat layer for hazards
+    if not haz_coords.empty:
+        weight_haz = pd.Series(1.0, index=haz_coords.index)
+        if 'severity_score' in haz_coords.columns:
+            w = pd.to_numeric(haz_coords['severity_score'], errors='coerce') / 5.0
+            weight_haz = w.fillna(weight_haz)
+        elif 'risk_score' in haz_coords.columns:
+            w = pd.to_numeric(haz_coords['risk_score'], errors='coerce') / 5.0
+            weight_haz = w.fillna(weight_haz)
+        if len(haz_coords) > 3000:
+            haz_coords = haz_coords.sample(3000, random_state=42)
+            weight_haz = weight_haz.loc[haz_coords.index]
+        haz_heat = list(zip(haz_coords['latitude'].astype(float), haz_coords['longitude'].astype(float), weight_haz.astype(float)))
+        HeatMap(haz_heat, name='Hazards Heat', min_opacity=0.2, max_zoom=18, radius=16, blur=10, gradient={0.0: 'green', 0.5: 'yellow', 0.75: 'orange', 1.0: 'darkred'}).add_to(m)
+
+    # Add count labels per place (top N) for clarity
+    def _add_count_labels(df_coords: pd.DataFrame, label_name: str, color: str, top_n: int = 25):
+        if df_coords.empty:
+            return
+        place_col = 'location.1' if 'location.1' in df_coords.columns else ('sublocation' if 'sublocation' in df_coords.columns else ('location' if 'location' in df_coords.columns else None))
+        if not place_col:
+            return
+        records = []
+        for place, grp in df_coords.groupby(df_coords[place_col].astype(str)):
+            lat = grp['latitude'].astype(float).mean()
+            lon = grp['longitude'].astype(float).mean()
+            cnt = len(grp)
+            sev_avg = pd.to_numeric(grp.get('severity_score', pd.Series(dtype=float)), errors='coerce').mean()
+            records.append({'place': place, 'lat': lat, 'lon': lon, 'count': cnt, 'sev': sev_avg})
+        if not records:
+            return
+        rec_df = pd.DataFrame(records).sort_values('count', ascending=False).head(top_n)
+        fg = folium.FeatureGroup(name=label_name, show=True)
+        for _, r in rec_df.iterrows():
+            html = f"""
+            <div style='background: rgba(255,255,255,0.85); border:1px solid #999; border-radius:4px; padding:2px 6px; font-size:12px; font-weight:700; color:{color}; box-shadow:0 1px 2px rgba(0,0,0,0.2)'>
+                {r['place']}: {int(r['count'])}
+            </div>
+            """
+            folium.Marker(
+                location=[r['lat'], r['lon']],
+                icon=folium.DivIcon(html=html)
+            ).add_to(fg)
+        fg.add_to(m)
+
+    _add_count_labels(inc_coords, 'Incident Counts (Top)', '#d32f2f')
+    _add_count_labels(haz_coords, 'Hazard Counts (Top)', '#c05621')
+
+    # Add limited detail markers with popups for both layers
+    if not inc_coords.empty:
+        inc_cluster = MarkerCluster(name='Incident Details', show=False)
+        for _, row in inc_coords.head(600).iterrows():
+            popup = f"<b>Incident</b><br>Location: {row.get('location.1', row.get('sublocation', 'Unknown'))}<br>Date: {row.get('occurrence_date','N/A')}<br>Status: {row.get('status','N/A')}<br>Severity: {row.get('severity_score','N/A')}<br>Risk: {row.get('risk_score','N/A')}"
+            folium.CircleMarker([float(row['latitude']), float(row['longitude'])], radius=3, color='red', fill=True, fill_opacity=0.6, popup=popup).add_to(inc_cluster)
+        inc_cluster.add_to(m)
+    if not haz_coords.empty:
+        haz_cluster = MarkerCluster(name='Hazard Details', show=False)
+        for _, row in haz_coords.head(600).iterrows():
+            popup = f"<b>Hazard</b><br>Location: {row.get('location.1', row.get('sublocation', 'Unknown'))}<br>Date: {row.get('occurrence_date','N/A')}<br>Status: {row.get('status','N/A')}<br>Severity: {row.get('severity_score','N/A')}<br>Risk: {row.get('risk_score','N/A')}"
+            folium.CircleMarker([float(row['latitude']), float(row['longitude'])], radius=3, color='orange', fill=True, fill_opacity=0.6, popup=popup).add_to(haz_cluster)
+        haz_cluster.add_to(m)
+
+    # Fit bounds to data if we have any coordinates
+    if not inc_coords.empty or not haz_coords.empty:
+        lat_concat = pd.concat([inc_coords['latitude'], haz_coords['latitude']]).astype(float)
+        lon_concat = pd.concat([inc_coords['longitude'], haz_coords['longitude']]).astype(float)
+        m.fit_bounds([[lat_concat.min(), lon_concat.min()], [lat_concat.max(), lon_concat.max()]])
+
+    folium.LayerControl().add_to(m)
+    st_folium(m, key="combined_heatmap", width=None, height=520)
+
+    # Metrics row under the single map
     col1, col2 = st.columns(2)
-
     with col1:
-        st.subheader("🔴 Incident Heatmap")
-        incident_map = create_folium_heatmap(
-            incident_df,
-            'Incidents',
-            color_gradient={0.0: 'blue', 0.5: 'yellow', 0.75: 'orange', 1.0: 'red'}
-        )
-        if FOLIUM_AVAILABLE:
-            st_folium(incident_map, key="incident_map", width=700, height=500)
-        else:
-            st.error("Folium not installed. Install with: pip install folium streamlit-folium")
-
-        # Statistics
-        incident_coords = incident_df.dropna(subset=['latitude', 'longitude'])
-        st.metric("Total Incidents", len(incident_coords))
-        top_location = incident_df['location.1'].value_counts().head(1)
-        if not top_location.empty:
-            st.metric("Hottest Zone", top_location.index[0], f"{top_location.values[0]} incidents")
-
+        st.metric("Total Incidents (mapped)", len(inc_coords))
     with col2:
-        st.subheader("⚠️ Hazard Heatmap")
-        hazard_map = create_folium_heatmap(
-            hazard_df,
-            'Hazards',
-            color_gradient={0.0: 'green', 0.5: 'yellow', 0.75: 'orange', 1.0: 'darkred'}
-        )
-        if FOLIUM_AVAILABLE:
-            st_folium(hazard_map, key="hazard_map", width=700, height=500)
-        else:
-            st.error("Folium not installed. Install with: pip install folium streamlit-folium")
-
-        # Statistics
-        hazard_coords = hazard_df.dropna(subset=['latitude', 'longitude'])
-        st.metric("Total Hazards", len(hazard_coords))
-        top_location = hazard_df['location.1'].value_counts().head(1)
-        if not top_location.empty:
-            st.metric("Highest Risk Zone", top_location.index[0], f"{top_location.values[0]} hazards")
+        st.metric("Total Hazards (mapped)", len(haz_coords))
 
 def create_3d_facility_heatmap(df, event_type='Incidents'):
     """Create a 3D surface heatmap of the facility"""
@@ -1405,22 +1491,26 @@ if uploaded_file is not None or use_example:
                     st.info("No incident or hazard data available for heatmap visualization.")
 
             elif heatmap_type == "Geographical Map":
-                if df_inc is not None and df_haz is not None:
-                    create_incident_hazard_heatmaps(df_inc, df_haz)
-                elif df_inc is not None:
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        create_incident_hazard_heatmaps(df_inc, pd.DataFrame())
-                    with col2:
-                        st.info("No hazard data available")
-                elif df_haz is not None:
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        st.info("No incident data available")
-                    with col2:
-                        create_incident_hazard_heatmaps(pd.DataFrame(), df_haz)
-                else:
-                    st.info("No incident or hazard data available for geographical mapping.")
+                st.subheader("🗺️ Geographical Heatmaps with Details")
+                try:
+                    incident_df = get_sheet_df(workbook, 'incident')
+                    hazard_df = get_sheet_df(workbook, 'hazard')
+                    if incident_df is None and hazard_df is None:
+                        st.info("No incident or hazard data available for geographical mapping.")
+                    else:
+                        # Build one combined static HTML map to avoid reruns during pan/zoom
+                        inc_df = maps_add_coords(incident_df if incident_df is not None else pd.DataFrame(), LOCATION_COORDINATES)
+                        haz_df = maps_add_coords(hazard_df if hazard_df is not None else pd.DataFrame(), LOCATION_COORDINATES)
+                        html_map = build_combined_map_html(inc_df, haz_df)
+                        components.html(html_map, height=540, scrolling=False)
+                        # Metrics
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            st.metric("Total Incidents (mapped)", len(inc_df.dropna(subset=['latitude','longitude'])) if inc_df is not None and not inc_df.empty else 0)
+                        with col2:
+                            st.metric("Total Hazards (mapped)", len(haz_df.dropna(subset=['latitude','longitude'])) if haz_df is not None and not haz_df.empty else 0)
+                except Exception as e:
+                    st.error(f"Failed to render maps: {e}")
 
             elif heatmap_type == "3D Surface":
                 col1, col2 = st.columns(2)
