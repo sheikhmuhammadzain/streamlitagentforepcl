@@ -14,15 +14,19 @@ import contextlib
 import traceback
 import matplotlib.pyplot as plt
 from analytics.hazard_incident import render_conversion_page, create_conversion_metrics_card
+from analytics.wordclouds import (
+    get_incident_hazard_department_words,
+    create_python_wordcloud_image,
+)
 from analytics.maps import add_coordinates_to_df as maps_add_coords, build_combined_map_html
 import streamlit.components.v1 as components
 try:
     import folium
     from folium.plugins import HeatMap, MarkerCluster, MiniMap, Fullscreen, MousePosition, MeasureControl
-    from streamlit_folium import st_folium
     FOLIUM_AVAILABLE = True
 except ImportError:
     FOLIUM_AVAILABLE = False
+
 try:
     from openai import OpenAI
     _OPENAI_AVAILABLE = True
@@ -1236,7 +1240,6 @@ def create_3d_facility_heatmap(df, event_type='Incidents'):
         height=600,
         margin=dict(t=40, l=20, r=20, b=20)
     )
-
     return fig
 
 # ---------- AI helpers ----------
@@ -2063,11 +2066,14 @@ if uploaded_file is not None or use_example:
             st.header("🧠 EPCL Data Agent")
             st.caption("Ask a question. The agent will generate Python, run it on the filtered data, then provide a prescriptive summary.")
             question = st.text_area("Your question about the filtered data", placeholder="e.g., Which departments have the highest risk and what should we focus on?")
-            sample_rows = st.slider("Sample rows included in context", 3, 10, 5)
-            show_ctx = st.checkbox("Show context sent to AI", value=False)
-            show_code = st.checkbox("Show generated code", value=True)
-            multi_sheets = st.checkbox("Enable multi-sheet reasoning (use all sheets)", value=True)
-            run_agent = st.button("Run EPCL Data Agent", type="primary")
+            with st.expander("⚙️ Agent settings", expanded=False):
+                sample_rows = st.slider("Sample rows included in context", 3, 10, 5)
+                show_ctx = st.checkbox("Show context sent to AI", value=False)
+                show_code = st.checkbox("Show generated code", value=True)
+                multi_sheets = st.checkbox("Enable multi-sheet reasoning (use all sheets)", value=True)
+            _c1, _c2, _c3, _c4, _c5 = st.columns([1, 1, 1, 1, 1])
+            with _c5:
+                run_agent = st.button("Run EPCL Data Agent", type="primary")
 
             if run_agent and question:
                 with st.spinner("Generating analysis code from your question..."):
@@ -2181,6 +2187,7 @@ if uploaded_file is not None or use_example:
                     "Risk Analysis",
                     "Time Trends",
                     "Department Performance",
+                    "Word Clouds",
                     "Data Quality",
                     "Predictive Analytics",
                     "PSM Analysis",
@@ -2223,6 +2230,29 @@ if uploaded_file is not None or use_example:
                 st.plotly_chart(fig_spider, width='stretch')
                 fig_loc = create_location_risk_treemap(incident_df if incident_df is not None else filtered_df)
                 st.plotly_chart(fig_loc, width='stretch')
+
+            elif analysis_category == "Word Clouds":
+                st.subheader("Top Departments by Mentions")
+                top_n = st.slider("Max words", 10, 150, 75)
+                min_count = st.slider("Min department frequency", 1, 10, 1)
+                extra_stop = st.text_input("Extra stopwords (comma-separated)", value="")
+                extra_set = {s.strip().lower() for s in extra_stop.split(',') if s.strip()} if extra_stop else set()
+                words = get_incident_hazard_department_words(incident_df, hazard_df, top_n=top_n, min_count=min_count, extra_stopwords=extra_set)
+
+                # Python WordCloud (default and only)
+                st.markdown("#### Incident Departments")
+                img_inc = create_python_wordcloud_image(words.get("incident", []), width=1600, height=520, colormap="coolwarm")
+                if img_inc:
+                    st.image(img_inc, caption="Incident Departments", use_container_width=True)
+                else:
+                    st.info("Python wordcloud not available or no data to display.")
+
+                st.markdown("#### Hazard Departments")
+                img_haz = create_python_wordcloud_image(words.get("hazard", []), width=1600, height=520, colormap="coolwarm")
+                if img_haz:
+                    st.image(img_haz, caption="Hazard Departments", use_container_width=True)
+                else:
+                    st.info("Python wordcloud not available or no data to display.")
 
             elif analysis_category == "Data Quality":
                 fig_dq = create_data_quality_metrics(incident_df)
