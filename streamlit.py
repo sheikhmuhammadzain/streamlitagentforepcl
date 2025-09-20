@@ -138,9 +138,38 @@ st.markdown("""
           font-family: 'Geist Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica Neue', Arial, sans-serif !important;
       }
 
-      /* Tabs */
-      .stTabs [data-baseweb="tab-list"], .stTabs button {
-          font-family: 'Geist Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica Neue', Arial, sans-serif !important;
+      /* Layout spacing refinements */
+      [data-testid="stAppViewContainer"] {
+          padding-top: 0.25rem !important;
+      }
+      .block-container {
+          padding-top: 0.25rem !important;
+          padding-bottom: 1.0rem !important;
+      }
+      h1, h2, h3 {
+          margin-top: 0.15rem !important;
+          margin-bottom: 0.15rem !important;
+      }
+      .stMarkdown h1, .stMarkdown h2, .stMarkdown h3 {
+          margin-top: 0.15rem !important;
+          margin-bottom: 0.15rem !important;
+      }
+      header[data-testid="stHeader"] {
+          background: transparent;
+      }
+
+      /* Tabs polish */
+      .stTabs [data-baseweb="tab-list"] {
+          margin-bottom: 0.25rem;
+          border-bottom: 1px solid #E5E7EB;
+          gap: 4px;
+      }
+      .stTabs [data-baseweb="tab"] {
+          padding: 6px 10px;
+      }
+      .stTabs [aria-selected="true"] {
+          border-bottom: 2px solid #16A34A !important;
+          color: #111827 !important;
       }
 
       /* Code blocks - Geist Mono (preserve syntax colors) */
