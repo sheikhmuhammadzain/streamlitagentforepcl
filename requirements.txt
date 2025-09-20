@@ -1,0 +1,7 @@
+streamlit>=1.36
+pandas>=2.1
+plotly>=5.22
+numpy>=1.26
+matplotlib>=3.8
+openpyxl>=3.1
+openai>=1.35  # optional, for HSE Data Agent

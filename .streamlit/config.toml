@@ -1,0 +1,7 @@
+[theme]
+base = "light"
+primaryColor = "#16A34A"            # Green 600
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F0FDF4" # Green 50
+textColor = "#111827"                # Near-black
+font = "sans serif"
