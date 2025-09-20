@@ -1534,15 +1534,6 @@ if uploaded_file is not None or use_example:
         with tab0:
             st.subheader("🌐 Overall – Incidents vs Hazards vs Relationships")
 
-            # Heatmap visualization type selector
-            st.markdown("### 🗺️ Real-time Risk Heat Maps")
-            heatmap_type = st.radio(
-                "Select Heat Map Type:",
-                ["Facility Layout (2D)", "Geographical Map", "3D Surface"],
-                horizontal=True,
-                label_visibility="collapsed"
-            )
-
             # Detect sheets by keyword
             hazard_sheet = next((s for s in sheet_names if 'hazard' in s.lower()), None)
             incident_sheet = next((s for s in sheet_names if 'incident' in s.lower()), None)
@@ -1569,6 +1560,30 @@ if uploaded_file is not None or use_example:
                     rel_haz_nunique = df_rel[haz_rel_col].nunique(dropna=True)
                 if inc_rel_col:
                     rel_inc_nunique = df_rel[inc_rel_col].nunique(dropna=True)
+
+            # Metrics row FIRST
+            c1, c2, c3, c4, c5 = st.columns(5)
+            with c1:
+                st.metric("Total Incidents", f"{incident_count:,}")
+            with c2:
+                st.metric("Total Hazards", f"{hazard_count:,}")
+            with c3:
+                st.metric("Relationships (rows)", f"{relationships_count:,}")
+            with c4:
+                st.metric("Incidents in Relationships", f"{rel_inc_nunique:,}")
+            with c5:
+                st.metric("Hazards in Relationships", f"{rel_haz_nunique:,}")
+
+            st.markdown("---")
+
+            # Heatmap visualization type selector (now after the cards)
+            st.markdown("### 🗺️ Real-time Risk Heat Maps")
+            heatmap_type = st.radio(
+                "Select Heat Map Type:",
+                ["Facility Layout (2D)", "Geographical Map", "3D Surface"],
+                horizontal=True,
+                label_visibility="collapsed"
+            )
 
             # Display selected heatmap
             if heatmap_type == "Facility Layout (2D)":
@@ -1620,21 +1635,6 @@ if uploaded_file is not None or use_example:
                         st.plotly_chart(fig_3d_haz, use_container_width=True)
                     else:
                         st.info("No hazard data available for 3D visualization.")
-
-            st.markdown("---")
-
-            # Metrics row
-            c1, c2, c3, c4, c5 = st.columns(5)
-            with c1:
-                st.metric("Total Incidents", f"{incident_count:,}")
-            with c2:
-                st.metric("Total Hazards", f"{hazard_count:,}")
-            with c3:
-                st.metric("Relationships (rows)", f"{relationships_count:,}")
-            with c4:
-                st.metric("Incidents in Relationships", f"{rel_inc_nunique:,}")
-            with c5:
-                st.metric("Hazards in Relationships", f"{rel_haz_nunique:,}")
 
             st.markdown("---")
 
