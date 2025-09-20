@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import numpy as np
 from datetime import datetime
 import warnings
@@ -257,6 +258,345 @@ def _fmt_num(v):
         return f"{float(v):.2f}"
     except Exception:
         return str(v)
+
+# Coerce a pandas Series to numeric days if it's timedelta/datetime-like
+def _to_days(series: pd.Series) -> pd.Series:
+    try:
+        if series is None:
+            return series
+        s = series
+        if np.issubdtype(s.dtype, np.timedelta64):
+            return s.dt.total_seconds() / 86400.0
+        if np.issubdtype(s.dtype, np.datetime64):
+            # Datetime values cannot be meaningfully compared to day counts; coerce to NaN
+            return pd.to_numeric(s, errors='coerce')
+        return pd.to_numeric(s, errors='coerce')
+    except Exception:
+        return pd.to_numeric(series, errors='coerce')
+# ---------- Cross-sheet helpers ----------
+def get_sheet_df(workbook: dict, name_contains: str):
+    """Return first sheet DataFrame whose name contains the given token (case-insensitive)."""
+    if not workbook:
+        return None
+    for s in workbook.keys():
+        if name_contains.lower() in s.lower():
+            return workbook[s]
+    return None
+
+# ---------- Advanced analytics chart builders ----------
+def create_unified_hse_scorecard(incident_df, hazard_df, audit_df, inspection_df):
+    fig = make_subplots(
+        rows=2, cols=4,
+        specs=[[{'type': 'indicator'}, {'type': 'indicator'}, {'type': 'indicator'}, {'type': 'indicator'}],
+               [{'type': 'bar'}, {'type': 'pie'}, {'type': 'scatter'}, {'type': 'box'}]],
+        subplot_titles=['Total Incidents', 'Total Hazards', 'Audits Completed', 'Inspections',
+                       'Monthly Trend', 'Status Distribution', 'Risk vs Cost', 'Resolution Times']
+    )
+
+    inc_count = len(incident_df) if incident_df is not None else 0
+    haz_count = len(hazard_df) if hazard_df is not None else 0
+    audits_completed = 0
+    if audit_df is not None and 'audit_status' in audit_df.columns:
+        audits_completed = (audit_df['audit_status'].astype(str).str.lower() == 'closed').sum()
+    insp_count = len(inspection_df) if inspection_df is not None else 0
+
+    fig.add_trace(go.Indicator(mode="number", value=inc_count, title="Incidents"), row=1, col=1)
+    fig.add_trace(go.Indicator(mode="number", value=haz_count, title="Hazards"), row=1, col=2)
+    fig.add_trace(go.Indicator(mode="number", value=audits_completed, title="Audits Completed"), row=1, col=3)
+    fig.add_trace(go.Indicator(mode="number", value=insp_count, title="Inspections"), row=1, col=4)
+
+    # Monthly trend from incidents occurrence_date
+    if incident_df is not None and 'occurrence_date' in incident_df.columns:
+        inc = incident_df.copy()
+        inc['_m'] = pd.to_datetime(inc['occurrence_date'], errors='coerce').dt.to_period('M')
+        trend = inc['_m'].value_counts().sort_index()
+        if not trend.empty:
+            fig.add_trace(go.Bar(x=trend.index.astype(str), y=trend.values, name='Incidents'), row=2, col=1)
+
+    # Status distribution (combine available statuses)
+    statuses = []
+    for df, col in [(incident_df, 'status'), (audit_df, 'audit_status'), (inspection_df, 'audit_status')]:
+        if df is not None and col in df.columns:
+            statuses.append(df[col].astype(str))
+    if statuses:
+        status_all = pd.concat(statuses, ignore_index=True)
+        vc = status_all.value_counts()
+        if not vc.empty:
+            fig.add_trace(go.Pie(labels=vc.index, values=vc.values, showlegend=False), row=2, col=2)
+
+    # Risk vs Cost (incidents)
+    if incident_df is not None and 'risk_score' in incident_df.columns and 'estimated_cost_impact' in incident_df.columns:
+        x = pd.to_numeric(incident_df['risk_score'], errors='coerce')
+        y = pd.to_numeric(incident_df['estimated_cost_impact'], errors='coerce')
+        fig.add_trace(go.Scatter(x=x, y=y, mode='markers', marker=dict(size=6, color=x, colorscale='Greens'), name='Risk vs Cost'), row=2, col=3)
+
+    # Resolution times box by status (coerce to days)
+    if incident_df is not None and 'resolution_time_days' in incident_df.columns:
+        fig.add_trace(go.Box(y=_to_days(incident_df['resolution_time_days']), name='Resolution Days', boxmean=True), row=2, col=4)
+
+    fig.update_layout(title="Unified HSE Scorecard")
+    return fig
+
+def create_hse_performance_index(df):
+    if df is None or len(df) == 0 or 'department' not in df.columns:
+        return go.Figure()
+    # Work on a copy and ensure numeric types
+    cp = df.copy()
+    for c in ['severity_score','risk_score']:
+        if c not in cp.columns:
+            cp[c] = np.nan
+        cp[c] = pd.to_numeric(cp[c], errors='coerce')
+    # Delay and resolution as numeric days
+    if 'reporting_delay_days' not in cp.columns:
+        cp['reporting_delay_days'] = np.nan
+    cp['reporting_delay_days'] = _to_days(cp['reporting_delay_days'])
+    if 'resolution_time_days' not in cp.columns:
+        cp['resolution_time_days'] = np.nan
+    cp['resolution_time_days'] = _to_days(cp['resolution_time_days'])
+    # Flags: ensure numeric 0..1
+    for c in ['root_cause_is_missing','corrective_actions_is_missing']:
+        if c not in cp.columns:
+            cp[c] = np.nan
+        # Treat truthy as 1, falsy as 0
+        cp[c] = pd.to_numeric(cp[c].astype(float), errors='coerce')
+
+    dept_metrics = cp.groupby('department').agg({
+        'severity_score': 'mean',
+        'risk_score': 'mean',
+        'reporting_delay_days': 'mean',
+        'resolution_time_days': 'mean',
+        'root_cause_is_missing': 'mean',
+        'corrective_actions_is_missing': 'mean'
+    }).fillna(0)
+
+    # Normalize into 0-100 where higher is better
+    sev = dept_metrics['severity_score'].clip(lower=0, upper=5)
+    risk = dept_metrics['risk_score'].clip(lower=0, upper=5)
+    rep = dept_metrics['reporting_delay_days'].clip(lower=0, upper=30)
+    res = dept_metrics['resolution_time_days'].clip(lower=0, upper=60)
+    rc_miss = dept_metrics['root_cause_is_missing'].clip(lower=0, upper=1)
+    ca_miss = dept_metrics['corrective_actions_is_missing'].clip(lower=0, upper=1)
+
+    idx = (
+        (5 - sev)/5 * 0.25 +
+        (5 - risk)/5 * 0.25 +
+        (30 - rep)/30 * 0.2 +
+        (60 - res)/60 * 0.2 +
+        (1 - rc_miss) * 0.05 +
+        (1 - ca_miss) * 0.05
+    ) * 100
+
+    dept_metrics = dept_metrics.assign(hse_index=idx)
+    fig = px.bar(
+        dept_metrics.reset_index(), x='hse_index', y='department', orientation='h',
+        color='hse_index', color_continuous_scale=['red','yellow','green'],
+        title='HSE Performance Index by Department (0-100)'
+    )
+    return fig
+
+def create_incident_action_funnel(incident_df, relationships_df):
+    if incident_df is None:
+        return go.Figure()
+    inc_total = len(incident_df)
+    invest_started = incident_df['entered_investigation'].notna().sum() if 'entered_investigation' in incident_df.columns else 0
+    if 'root_cause_is_missing' in incident_df.columns:
+        rc = incident_df['root_cause_is_missing']
+        # Treat NaN as missing (1); identified when value is 0/False
+        rc_num = pd.to_numeric(rc, errors='coerce').fillna(1).astype(int)
+        root_identified = (rc_num == 0).sum()
+    else:
+        root_identified = 0
+    closed_inc = (incident_df['status'].astype(str).str.lower() == 'closed').sum() if 'status' in incident_df.columns else 0
+    with_actions = 0
+    if relationships_df is not None and {'source_type','source_id','target_type'}.issubset(relationships_df.columns):
+        with_actions = relationships_df[relationships_df['source_type'].astype(str).str.lower().eq('incident')]['source_id'].nunique()
+    fig = go.Figure(go.Funnel(
+        y=['Total Incidents','Investigation Started','Root Cause Identified','Corrective Actions Generated','Incidents Closed'],
+        x=[inc_total, invest_started, root_identified, with_actions, closed_inc],
+        textposition='inside', textinfo='value+percent initial',
+        marker={'color':['#16A34A','#34D399','#A7F3D0','#F59E0B','#065F46']}
+    ))
+    fig.update_layout(title='Incident Management Funnel')
+    return fig
+
+def create_risk_calendar_heatmap(df):
+    if df is None or 'occurrence_date' not in df.columns or 'department' not in df.columns or 'risk_score' not in df.columns:
+        return go.Figure()
+    cp = df.copy()
+    cp['month'] = pd.to_datetime(cp['occurrence_date'], errors='coerce').dt.to_period('M')
+    risk_pivot = cp.pivot_table(values='risk_score', index='department', columns='month', aggfunc='mean')
+    fig = px.imshow(risk_pivot, labels=dict(x='Month', y='Department', color='Avg Risk Score'), color_continuous_scale='RdYlGn_r', title='Department Risk Score Evolution', aspect='auto', text_auto=True)
+    return fig
+
+def create_psm_breakdown(incident_df):
+    if incident_df is None:
+        return go.Figure()
+    psm_counts = incident_df['psm'].value_counts(dropna=True) if 'psm' in incident_df.columns else pd.Series(dtype=int)
+    pse_counts = incident_df['pse_category'].value_counts(dropna=True) if 'pse_category' in incident_df.columns else pd.Series(dtype=int)
+    fig = make_subplots(rows=1, cols=2, subplot_titles=['PSM Elements','PSE Categories'], specs=[[{'type':'pie'},{'type':'bar'}]])
+    if not psm_counts.empty:
+        fig.add_trace(go.Pie(labels=psm_counts.index, values=psm_counts.values, hole=0.4), row=1, col=1)
+    if not pse_counts.empty:
+        fig.add_trace(go.Bar(x=pse_counts.values, y=pse_counts.index, orientation='h'), row=1, col=2)
+    fig.update_layout(title='Process Safety Management Analysis')
+    return fig
+
+def create_consequence_matrix(df):
+    if df is None or 'actual_consequence_incident' not in df.columns or 'worst_case_consequence_incident' not in df.columns:
+        return go.Figure()
+    ct = pd.crosstab(df['actual_consequence_incident'], df['worst_case_consequence_incident'])
+    fig = px.imshow(ct, labels=dict(x='Worst Case', y='Actual', color='Count'), title='Actual vs Worst Case Consequence Matrix', color_continuous_scale='YlOrRd', text_auto=True)
+    return fig
+
+def create_data_quality_metrics(incident_df):
+    if incident_df is None:
+        return go.Figure()
+    fig = make_subplots(rows=2, cols=3, subplot_titles=['Root Cause Missing','Corrective Actions Missing','Reporting Delays','Resolution Times by Status','', ''])
+    if 'department' in incident_df.columns and 'root_cause_is_missing' in incident_df.columns:
+        missing_rc = incident_df.groupby('department')['root_cause_is_missing'].sum()
+        fig.add_trace(go.Bar(x=missing_rc.index, y=missing_rc.values, name='Root Cause Missing'), row=1, col=1)
+    if 'department' in incident_df.columns and 'corrective_actions_is_missing' in incident_df.columns:
+        missing_ca = incident_df.groupby('department')['corrective_actions_is_missing'].sum()
+        fig.add_trace(go.Bar(x=missing_ca.index, y=missing_ca.values, name='Actions Missing'), row=1, col=2)
+    if 'reporting_delay_days' in incident_df.columns:
+        fig.add_trace(go.Histogram(x=_to_days(incident_df['reporting_delay_days']), nbinsx=30, name='Reporting Delay'), row=1, col=3)
+    if {'resolution_time_days','status'}.issubset(incident_df.columns):
+        fig.add_trace(go.Box(y=_to_days(incident_df['resolution_time_days']), x=incident_df['status'], name='Resolution by Status'), row=2, col=1)
+    fig.update_layout(title='Data Quality Metrics')
+    return fig
+
+def create_comprehensive_timeline(df):
+    if df is None or 'occurrence_date' not in df.columns:
+        return go.Figure()
+    cp = df.copy()
+    cp['week'] = pd.to_datetime(cp['occurrence_date'], errors='coerce').dt.to_period('W')
+    agg_dict = {}
+    count_col = 'incident_id' if 'incident_id' in cp.columns else cp.columns[0]
+    agg_dict[count_col] = 'count'
+    if 'severity_score' in cp.columns:
+        agg_dict['severity_score'] = 'mean'
+    if 'risk_score' in cp.columns:
+        agg_dict['risk_score'] = 'mean'
+    if 'estimated_cost_impact' in cp.columns:
+        agg_dict['estimated_cost_impact'] = 'sum'
+    if 'estimated_manhours_impact' in cp.columns:
+        agg_dict['estimated_manhours_impact'] = 'sum'
+    agg = cp.groupby('week').agg(agg_dict).reset_index()
+    fig = make_subplots(rows=3, cols=1, shared_xaxes=True, subplot_titles=['Incident Count','Risk & Severity Scores','Cost & Manhour Impact'], row_heights=[0.3,0.35,0.35])
+    fig.add_trace(go.Bar(x=agg['week'].astype(str), y=agg[count_col], name='Count'), row=1, col=1)
+    if 'severity_score' in agg.columns:
+        fig.add_trace(go.Scatter(x=agg['week'].astype(str), y=agg['severity_score'], name='Severity', line=dict(color='red')), row=2, col=1)
+    if 'risk_score' in agg.columns:
+        fig.add_trace(go.Scatter(x=agg['week'].astype(str), y=agg['risk_score'], name='Risk', line=dict(color='orange')), row=2, col=1)
+    if 'estimated_cost_impact' in agg.columns:
+        fig.add_trace(go.Bar(x=agg['week'].astype(str), y=agg['estimated_cost_impact'], name='Cost ($)', marker_color='green'), row=3, col=1)
+    if 'estimated_manhours_impact' in agg.columns:
+        fig.add_trace(go.Bar(x=agg['week'].astype(str), y=agg['estimated_manhours_impact'], name='Manhours', marker_color='#34D399'), row=3, col=1)
+    fig.update_layout(title='Comprehensive HSE Timeline')
+    return fig
+
+def create_audit_inspection_tracker(audit_df, inspection_df):
+    fig = make_subplots(rows=2, cols=1, subplot_titles=['Audit Status Over Time','Inspection Status Over Time'])
+    if audit_df is not None and {'start_date','audit_status'}.issubset(audit_df.columns):
+        aud = audit_df.copy()
+        aud['_m'] = pd.to_datetime(aud['start_date'], errors='coerce').dt.to_period('M')
+        timeline = aud.groupby([aud['_m'], 'audit_status']).size().unstack(fill_value=0)
+        for status in timeline.columns:
+            fig.add_trace(go.Bar(x=timeline.index.astype(str), y=timeline[status], name=str(status)), row=1, col=1)
+    if inspection_df is not None and {'start_date','audit_status'}.issubset(inspection_df.columns):
+        ins = inspection_df.copy()
+        ins['_m'] = pd.to_datetime(ins['start_date'], errors='coerce').dt.to_period('M')
+        timeline = ins.groupby([ins['_m'], 'audit_status']).size().unstack(fill_value=0)
+        for status in timeline.columns:
+            fig.add_trace(go.Bar(x=timeline.index.astype(str), y=timeline[status], name=str(status)), row=2, col=1)
+    fig.update_layout(barmode='stack', title='Audit & Inspection Compliance Tracking')
+    return fig
+
+def create_location_risk_treemap(df):
+    if df is None or not {'location','sublocation'}.issubset(df.columns):
+        return go.Figure()
+    cp = df.copy()
+    # Provide defaults if metrics are missing
+    if 'incident_id' not in cp.columns: cp['incident_id'] = 1
+    for c in ['severity_score','risk_score','estimated_cost_impact']:
+        if c not in cp.columns: cp[c] = np.nan
+    location_data = cp.groupby(['location','sublocation']).agg({
+        'incident_id': 'count', 'severity_score':'mean','risk_score':'mean','estimated_cost_impact':'sum'
+    }).reset_index()
+    location_data['size'] = location_data['incident_id']
+    location_data['hover_text'] = (
+        'Count: ' + location_data['incident_id'].astype(str) +
+        '<br>Avg Severity: ' + location_data['severity_score'].round(2).astype(str) +
+        '<br>Total Cost: ' + location_data['estimated_cost_impact'].round(0).astype(str)
+    )
+    fig = px.treemap(location_data, path=['location','sublocation'], values='size', color='risk_score', hover_data={'hover_text':True}, color_continuous_scale='RdYlGn_r', title='Location Risk Map (Size=Count, Color=Risk)')
+    return fig
+
+def create_department_spider(df):
+    if df is None or 'department' not in df.columns:
+        return go.Figure()
+    cp = df.copy()
+    for col in ['severity_score','risk_score','reporting_delay_days','resolution_time_days','root_cause_is_missing','corrective_actions_is_missing']:
+        if col not in cp.columns: cp[col] = np.nan
+    # Coerce delay/resolution to days
+    cp['reporting_delay_days'] = _to_days(cp['reporting_delay_days'])
+    cp['resolution_time_days'] = _to_days(cp['resolution_time_days'])
+    dept_metrics = cp.groupby('department').agg({
+        'severity_score': lambda x: 5 - np.nanmean(x),
+        'risk_score': lambda x: 5 - np.nanmean(x),
+        'reporting_delay_days': lambda x: max(0, 30 - np.nanmean(x)),
+        'resolution_time_days': lambda x: max(0, 60 - np.nanmean(x)),
+        'root_cause_is_missing': lambda x: 100 * (1 - np.nanmean(x)),
+        'corrective_actions_is_missing': lambda x: 100 * (1 - np.nanmean(x)),
+    }).fillna(0)
+    # Normalize 0-100
+    for col in dept_metrics.columns:
+        m = dept_metrics[col].max()
+        if m and m > 0:
+            dept_metrics[col] = (dept_metrics[col] / m) * 100
+    fig = go.Figure()
+    labels = ['Low Severity','Low Risk','Fast Reporting','Quick Resolution','Root Cause ID','Actions Taken']
+    for dept in dept_metrics.index[:5]:
+        fig.add_trace(go.Scatterpolar(r=dept_metrics.loc[dept].values, theta=labels, fill='toself', name=str(dept)))
+    fig.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0,100])), title='Department HSE Performance Radar', showlegend=True)
+    return fig
+
+def create_violation_analysis(hazard_df):
+    if hazard_df is None:
+        return go.Figure()
+    fig = make_subplots(rows=2, cols=2, subplot_titles=['Violation Types','Consequences Distribution','Reporting Delays','Department Violations'])
+    if 'violation_type_hazard_id' in hazard_df.columns:
+        vc = hazard_df['violation_type_hazard_id'].value_counts()
+        fig.add_trace(go.Bar(x=vc.values, y=vc.index, orientation='h'), row=1, col=1)
+    if 'worst_case_consequence_potential_hazard_id' in hazard_df.columns:
+        vc = hazard_df['worst_case_consequence_potential_hazard_id'].value_counts()
+        fig.add_trace(go.Pie(labels=vc.index, values=vc.values), row=1, col=2)
+    if 'reporting_delay_days' in hazard_df.columns:
+        fig.add_trace(go.Histogram(x=hazard_df['reporting_delay_days'], nbinsx=20), row=2, col=1)
+    if {'department','violation_type_hazard_id'}.issubset(hazard_df.columns):
+        ctab = pd.crosstab(hazard_df['department'], hazard_df['violation_type_hazard_id'])
+        fig.add_trace(go.Heatmap(z=ctab.values, x=ctab.columns, y=ctab.index, colorscale='YlOrRd'), row=2, col=2)
+    fig.update_layout(title='Hazard Violation Analysis')
+    return fig
+
+def create_cost_prediction_analysis(df):
+    if df is None or 'estimated_cost_impact' not in df.columns:
+        return go.Figure()
+    numeric_cols = [c for c in ['severity_score','risk_score','reporting_delay_days','resolution_time_days','estimated_manhours_impact'] if c in df.columns]
+    sub = df[numeric_cols + ['estimated_cost_impact']].dropna()
+    fig = make_subplots(rows=2, cols=2, subplot_titles=['Cost Correlations','Cost vs Severity','Cost vs Risk','Cost by Category'])
+    if not sub.empty and len(numeric_cols) > 0:
+        corrs = sub.corr(numeric_only=True)['estimated_cost_impact'].drop('estimated_cost_impact', errors='ignore')
+        if not corrs.empty:
+            fig.add_trace(go.Bar(x=corrs.values, y=corrs.index, orientation='h', marker_color=corrs.values, marker_colorscale='RdBu'), row=1, col=1)
+    if {'severity_score','estimated_cost_impact'}.issubset(df.columns):
+        fig.add_trace(go.Scatter(x=df['severity_score'], y=df['estimated_cost_impact'], mode='markers', marker=dict(size=5)), row=1, col=2)
+    if {'risk_score','estimated_cost_impact'}.issubset(df.columns):
+        fig.add_trace(go.Scatter(x=df['risk_score'], y=df['estimated_cost_impact'], mode='markers', marker=dict(size=5)), row=2, col=1)
+    if {'category','estimated_cost_impact'}.issubset(df.columns):
+        fig.add_trace(go.Box(x=df['category'], y=df['estimated_cost_impact']), row=2, col=2)
+    fig.update_layout(title='Cost Impact Analysis')
+    return fig
 
 # ---------- AI helpers ----------
 def build_ai_context(df: pd.DataFrame, max_numeric_cols: int = 6, max_cat_cols: int = 6, sample_rows: int = 5) -> str:
@@ -537,14 +877,15 @@ if uploaded_file is not None or use_example:
         # Apply filters
         filtered_df = apply_filters(df, schema, date_range, statuses, departments, locations, categories)
 
-        # Tabs (added Overall across-sheets view)
-        tab0, tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        # Tabs (added Overall across-sheets view + Advanced Analytics)
+        tab0, tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
             "🌐 Overall",
             "📊 Overview",
             "🔎 Deep Dive",
             "📋 Data Table",
             "📑 Summary Report",
             "🧠 HSE Data Agent",
+            "🚀 Advanced Analytics",
         ])
 
         # Tab 0: Overall (across all sheets)
@@ -709,7 +1050,7 @@ if uploaded_file is not None or use_example:
                     series['_dt'] = series['_dt'].dt.to_timestamp()
                     fig_ts = px.line(series, x='_dt', y='count', title=f"Records over time ({dc})")
                     fig_ts.update_layout(height=300)
-                    st.plotly_chart(fig_ts, use_container_width=True)
+                    st.plotly_chart(fig_ts, width='stretch')
                 else:
                     st.info("No date column detected for time series.")
 
@@ -719,7 +1060,7 @@ if uploaded_file is not None or use_example:
                 if not vc.empty:
                     fig_dep = px.bar(x=vc.values, y=vc.index, orientation='h', title="Top Departments")
                     fig_dep.update_layout(height=380, yaxis={'categoryorder':'total ascending'})
-                    st.plotly_chart(fig_dep, use_container_width=True)
+                    st.plotly_chart(fig_dep, width='stretch')
                 else:
                     st.info("No department column available.")
 
@@ -730,7 +1071,7 @@ if uploaded_file is not None or use_example:
                 if not vc.empty:
                     fig_status = px.pie(values=vc.values, names=vc.index, title="Status Distribution")
                     fig_status.update_layout(height=300)
-                    st.plotly_chart(fig_status, use_container_width=True)
+                    st.plotly_chart(fig_status, width='stretch')
                 else:
                     st.info("No status column available.")
 
@@ -740,7 +1081,7 @@ if uploaded_file is not None or use_example:
                 if not vc.empty:
                     fig_loc = px.bar(x=vc.values, y=vc.index, orientation='h', title="Top Locations")
                     fig_loc.update_layout(height=380, yaxis={'categoryorder':'total ascending'})
-                    st.plotly_chart(fig_loc, use_container_width=True)
+                    st.plotly_chart(fig_loc, width='stretch')
                 else:
                     st.info("No location column available.")
 
@@ -755,24 +1096,24 @@ if uploaded_file is not None or use_example:
                 if not vc.empty:
                     fig_cat = px.bar(x=vc.index, y=vc.values, title="Category Distribution")
                     fig_cat.update_layout(xaxis_tickangle=-45)
-                    st.plotly_chart(fig_cat, use_container_width=True)
+                    st.plotly_chart(fig_cat, width='stretch')
                 # Consequence
                 cons = schema.get('consequence_col')
                 vc = safe_value_counts(filtered_df, cons)
                 if not vc.empty:
                     fig_cons = px.pie(values=vc.values, names=vc.index, title="Worst/Relevant Consequences")
-                    st.plotly_chart(fig_cons, use_container_width=True)
+                    st.plotly_chart(fig_cons, width='stretch')
 
             with col2:
                 # Severity and Risk histograms if present
                 sev = schema.get('severity_col')
                 if sev and sev in filtered_df.columns and filtered_df[sev].notna().any():
                     fig_sev = px.histogram(filtered_df, x=sev, nbins=20, title="Severity Score Distribution")
-                    st.plotly_chart(fig_sev, use_container_width=True)
+                    st.plotly_chart(fig_sev, width='stretch')
                 rk = schema.get('risk_col')
                 if rk and rk in filtered_df.columns and filtered_df[rk].notna().any():
                     fig_risk = px.histogram(filtered_df, x=rk, nbins=20, title="Risk Score Distribution")
-                    st.plotly_chart(fig_risk, use_container_width=True)
+                    st.plotly_chart(fig_risk, width='stretch')
 
             # Timeliness metrics
             col3, col4 = st.columns(2)
@@ -781,19 +1122,21 @@ if uploaded_file is not None or use_example:
                 if rd and rd in filtered_df.columns and filtered_df[rd].notna().any():
                     st.subheader("Reporting Delay (days)")
                     colA, colB, colC = st.columns(3)
-                    with colA: st.metric("Avg", _fmt_num(filtered_df[rd].mean()))
-                    with colB: st.metric("P90", _fmt_num(filtered_df[rd].quantile(0.9)))
-                    with colC: st.metric("Max", _fmt_num(filtered_df[rd].max()))
-                    st.plotly_chart(px.histogram(filtered_df, x=rd, nbins=30, title="Reporting Delay Histogram"), use_container_width=True)
+                    _rd = _to_days(filtered_df[rd])
+                    with colA: st.metric("Avg", _fmt_num(_rd.mean()))
+                    with colB: st.metric("P90", _fmt_num(_rd.quantile(0.9)))
+                    with colC: st.metric("Max", _fmt_num(_rd.max()))
+                    st.plotly_chart(px.histogram(_rd.dropna(), nbins=30, title="Reporting Delay Histogram"), width='stretch')
             with col4:
                 rt = schema.get('resolution_time_col')
                 if rt and rt in filtered_df.columns and filtered_df[rt].notna().any():
                     st.subheader("Resolution Time (days)")
                     colA, colB, colC = st.columns(3)
-                    with colA: st.metric("Avg", _fmt_num(filtered_df[rt].mean()))
-                    with colB: st.metric("P90", _fmt_num(filtered_df[rt].quantile(0.9)))
-                    with colC: st.metric("Max", _fmt_num(filtered_df[rt].max()))
-                    st.plotly_chart(px.histogram(filtered_df, x=rt, nbins=30, title="Resolution Time Histogram"), use_container_width=True)
+                    _rt = _to_days(filtered_df[rt])
+                    with colA: st.metric("Avg", _fmt_num(_rt.mean()))
+                    with colB: st.metric("P90", _fmt_num(_rt.quantile(0.9)))
+                    with colC: st.metric("Max", _fmt_num(_rt.max()))
+                    st.plotly_chart(px.histogram(_rt.dropna(), nbins=30, title="Resolution Time Histogram"), width='stretch')
 
             # Data quality flags
             flags = schema.get('flags', [])
@@ -929,7 +1272,7 @@ if uploaded_file is not None or use_example:
                 else:
                     if 'fig' in env and env['fig'] is not None:
                         try:
-                            st.plotly_chart(env['fig'], use_container_width=True)
+                            st.plotly_chart(env['fig'], width='stretch')
                         except Exception:
                             st.warning("'fig' was not a valid Plotly figure.")
                     if 'mpl_fig' in env and env['mpl_fig'] is not None:
@@ -946,7 +1289,7 @@ if uploaded_file is not None or use_example:
                         try:
                             for _k, _v in env.items():
                                 if isinstance(_v, go.Figure):
-                                    st.plotly_chart(_v, use_container_width=True)
+                                    st.plotly_chart(_v, width='stretch')
                                     break
                         except Exception:
                             pass
@@ -985,6 +1328,81 @@ if uploaded_file is not None or use_example:
                     summary_resp = ask_openai(summary_question, run_ctx, code_mode=False)
                 st.markdown("### Prescriptive summary")
                 st.markdown(summary_resp)
+
+        # Tab 6: Advanced Analytics
+        with tab6:
+            st.header("Advanced HSE Analytics")
+            # Gather common DataFrames
+            incident_df = get_sheet_df(workbook, 'incident')
+            hazard_df = get_sheet_df(workbook, 'hazard')
+            audit_df = get_sheet_df(workbook, 'audit')
+            inspection_df = get_sheet_df(workbook, 'inspection')
+            relationships_df = get_sheet_df(workbook, 'relationship')
+
+            analysis_category = st.selectbox(
+                "Select Analysis Category",
+                [
+                    "Executive Overview",
+                    "Risk Analysis",
+                    "Time Trends",
+                    "Department Performance",
+                    "Data Quality",
+                    "Predictive Analytics",
+                    "PSM Analysis",
+                    "Hazard Violation Analysis",
+                ]
+            )
+
+            if analysis_category == "Executive Overview":
+                col1, col2 = st.columns(2)
+                with col1:
+                    fig1 = create_unified_hse_scorecard(incident_df, hazard_df, audit_df, inspection_df)
+                    st.plotly_chart(fig1, width='stretch')
+                with col2:
+                    # Use incident_df for department index if available; fallback to current filtered_df
+                    base_df = incident_df if incident_df is not None else filtered_df
+                    fig2 = create_hse_performance_index(base_df)
+                    st.plotly_chart(fig2, width='stretch')
+
+                # Incident action funnel (uses incidents + relationships)
+                fig3 = create_incident_action_funnel(incident_df, relationships_df)
+                st.plotly_chart(fig3, width='stretch')
+
+            elif analysis_category == "Risk Analysis":
+                # Consequence matrix (incident)
+                fig_cm = create_consequence_matrix(incident_df)
+                st.plotly_chart(fig_cm, width='stretch')
+                # Risk calendar heatmap (incident)
+                fig_heat = create_risk_calendar_heatmap(incident_df)
+                st.plotly_chart(fig_heat, width='stretch')
+
+            elif analysis_category == "Time Trends":
+                fig_tl = create_comprehensive_timeline(incident_df)
+                st.plotly_chart(fig_tl, width='stretch')
+                fig_tracker = create_audit_inspection_tracker(audit_df, inspection_df)
+                st.plotly_chart(fig_tracker, width='stretch')
+
+            elif analysis_category == "Department Performance":
+                fig_spider = create_department_spider(incident_df if incident_df is not None else filtered_df)
+                st.plotly_chart(fig_spider, width='stretch')
+                fig_loc = create_location_risk_treemap(incident_df if incident_df is not None else filtered_df)
+                st.plotly_chart(fig_loc, width='stretch')
+
+            elif analysis_category == "Data Quality":
+                fig_dq = create_data_quality_metrics(incident_df)
+                st.plotly_chart(fig_dq, width='stretch')
+
+            elif analysis_category == "Predictive Analytics":
+                fig_cost = create_cost_prediction_analysis(incident_df if incident_df is not None else filtered_df)
+                st.plotly_chart(fig_cost, width='stretch')
+
+            elif analysis_category == "PSM Analysis":
+                fig_psm = create_psm_breakdown(incident_df)
+                st.plotly_chart(fig_psm, width='stretch')
+
+            elif analysis_category == "Hazard Violation Analysis":
+                fig_vi = create_violation_analysis(hazard_df)
+                st.plotly_chart(fig_vi, width='stretch')
 
     else:
         st.error("Failed to load workbook. Please upload a valid .xlsx or place 'EPCL_VEHS_Data_Processed.xlsx' alongside this app.")
