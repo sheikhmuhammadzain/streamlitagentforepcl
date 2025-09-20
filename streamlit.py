@@ -566,19 +566,25 @@ def create_violation_analysis(hazard_df):
         rows=2, cols=2,
         subplot_titles=['Violation Types','Consequences Distribution','Reporting Delays','Department Violations'],
         specs=[[{'type':'xy'}, {'type':'domain'}],
-               [{'type':'xy'}, {'type':'heatmap'}]]
+               [{'type':'xy'}, {'type':'xy'}]]  # heatmap also works in an 'xy' subplot
     )
     if 'violation_type_hazard_id' in hazard_df.columns:
         vc = hazard_df['violation_type_hazard_id'].value_counts()
         fig.add_trace(go.Bar(x=vc.values, y=vc.index, orientation='h'), row=1, col=1)
     if 'worst_case_consequence_potential_hazard_id' in hazard_df.columns:
         vc = hazard_df['worst_case_consequence_potential_hazard_id'].value_counts()
-        fig.add_trace(go.Pie(labels=vc.index, values=vc.values), row=1, col=2)
+        if not vc.empty:
+            try:
+                fig.add_trace(go.Pie(labels=vc.index, values=vc.values), row=1, col=2)
+            except ValueError:
+                # Fallback: render as a bar if subplot type is not domain due to environment quirks
+                fig.add_trace(go.Bar(x=vc.values, y=vc.index, orientation='h', name='Consequences'), row=1, col=2)
     if 'reporting_delay_days' in hazard_df.columns:
         fig.add_trace(go.Histogram(x=_to_days(hazard_df['reporting_delay_days']), nbinsx=20), row=2, col=1)
     if {'department','violation_type_hazard_id'}.issubset(hazard_df.columns):
         ctab = pd.crosstab(hazard_df['department'], hazard_df['violation_type_hazard_id'])
-        fig.add_trace(go.Heatmap(z=ctab.values, x=ctab.columns, y=ctab.index, colorscale='YlOrRd'), row=2, col=2)
+        if ctab.size > 0:
+            fig.add_trace(go.Heatmap(z=ctab.values, x=ctab.columns, y=ctab.index, colorscale='YlOrRd'), row=2, col=2)
     fig.update_layout(title='Hazard Violation Analysis')
     return fig
 
