@@ -406,9 +406,24 @@ def create_risk_calendar_heatmap(df):
     if df is None or 'occurrence_date' not in df.columns or 'department' not in df.columns or 'risk_score' not in df.columns:
         return go.Figure()
     cp = df.copy()
+    # Create monthly period, then pivot; convert Periods to strings before plotting
     cp['month'] = pd.to_datetime(cp['occurrence_date'], errors='coerce').dt.to_period('M')
     risk_pivot = cp.pivot_table(values='risk_score', index='department', columns='month', aggfunc='mean')
-    fig = px.imshow(risk_pivot, labels=dict(x='Month', y='Department', color='Avg Risk Score'), color_continuous_scale='RdYlGn_r', title='Department Risk Score Evolution', aspect='auto', text_auto=True)
+    # Ensure JSON-serializable labels
+    x_labels = risk_pivot.columns.astype(str).tolist()
+    y_labels = risk_pivot.index.astype(str).tolist()
+    z = risk_pivot.to_numpy()
+    fig = px.imshow(
+        z,
+        labels=dict(x='Month', y='Department', color='Avg Risk Score'),
+        x=x_labels,
+        y=y_labels,
+        color_continuous_scale='RdYlGn_r',
+        title='Department Risk Score Evolution',
+        aspect='auto',
+        text_auto=True,
+    )
+    fig.update_xaxes(tickangle=-45)
     return fig
 
 def create_psm_breakdown(incident_df):
@@ -547,7 +562,12 @@ def create_department_spider(df):
 def create_violation_analysis(hazard_df):
     if hazard_df is None:
         return go.Figure()
-    fig = make_subplots(rows=2, cols=2, subplot_titles=['Violation Types','Consequences Distribution','Reporting Delays','Department Violations'])
+    fig = make_subplots(
+        rows=2, cols=2,
+        subplot_titles=['Violation Types','Consequences Distribution','Reporting Delays','Department Violations'],
+        specs=[[{'type':'xy'}, {'type':'domain'}],
+               [{'type':'xy'}, {'type':'heatmap'}]]
+    )
     if 'violation_type_hazard_id' in hazard_df.columns:
         vc = hazard_df['violation_type_hazard_id'].value_counts()
         fig.add_trace(go.Bar(x=vc.values, y=vc.index, orientation='h'), row=1, col=1)
@@ -555,7 +575,7 @@ def create_violation_analysis(hazard_df):
         vc = hazard_df['worst_case_consequence_potential_hazard_id'].value_counts()
         fig.add_trace(go.Pie(labels=vc.index, values=vc.values), row=1, col=2)
     if 'reporting_delay_days' in hazard_df.columns:
-        fig.add_trace(go.Histogram(x=hazard_df['reporting_delay_days'], nbinsx=20), row=2, col=1)
+        fig.add_trace(go.Histogram(x=_to_days(hazard_df['reporting_delay_days']), nbinsx=20), row=2, col=1)
     if {'department','violation_type_hazard_id'}.issubset(hazard_df.columns):
         ctab = pd.crosstab(hazard_df['department'], hazard_df['violation_type_hazard_id'])
         fig.add_trace(go.Heatmap(z=ctab.values, x=ctab.columns, y=ctab.index, colorscale='YlOrRd'), row=2, col=2)
