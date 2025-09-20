@@ -48,7 +48,7 @@ px.defaults.color_continuous_scale = px.colors.sequential.Greens
 
 # Page configuration
 st.set_page_config(
-    page_title="HSE Analytics Dashboard",
+    page_title="EPCL Analytics Dashboard",
     page_icon="🧯",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -91,7 +91,7 @@ st.markdown("""
     """, unsafe_allow_html=True)
 
 # Title and description
-st.title("🧯 EPCL HSE Analytics Dashboard")
+st.title("🧯 EPCL  Analytics Dashboard")
 st.markdown("### Incidents, Hazards, Audits, Inspections – Interactive Analysis")
 
 # Sidebar for file upload and filters
@@ -1605,7 +1605,7 @@ if uploaded_file is not None or use_example:
             "🔎 Deep Dive",
             "📋 Data Table",
             "📑 Summary Report",
-            "🧠 HSE Data Agent",
+            "🧠 EPCL Data Agent",
             "🚀 Advanced Analytics",
             "🔄 Hazard-Incident Analysis",
         ])
@@ -2060,14 +2060,14 @@ if uploaded_file is not None or use_example:
 
         # Tab 5: AI Agent
         with tab5:
-            st.header("🧠 HSE Data Agent")
+            st.header("🧠 EPCL Data Agent")
             st.caption("Ask a question. The agent will generate Python, run it on the filtered data, then provide a prescriptive summary.")
             question = st.text_area("Your question about the filtered data", placeholder="e.g., Which departments have the highest risk and what should we focus on?")
             sample_rows = st.slider("Sample rows included in context", 3, 10, 5)
             show_ctx = st.checkbox("Show context sent to AI", value=False)
             show_code = st.checkbox("Show generated code", value=True)
             multi_sheets = st.checkbox("Enable multi-sheet reasoning (use all sheets)", value=True)
-            run_agent = st.button("Run HSE Data Agent", type="primary")
+            run_agent = st.button("Run EPCL Data Agent", type="primary")
 
             if run_agent and question:
                 with st.spinner("Generating analysis code from your question..."):
@@ -2166,7 +2166,7 @@ if uploaded_file is not None or use_example:
 
         # Tab 6: Advanced Analytics
         with tab6:
-            st.header("Advanced HSE Analytics")
+            st.header("Advanced EPCL Analytics")
             # Gather common DataFrames
             incident_df = get_sheet_df(workbook, 'incident')
             hazard_df = get_sheet_df(workbook, 'hazard')
@@ -2277,6 +2277,6 @@ else:
 st.markdown("---")
 st.markdown("""
     <div style='text-align: center'>
-        <p>HSE Analytics Dashboard v1.0 </p>
+        <p>EPCL Analytics Dashboard v1.0 </p>
     </div>
     """, unsafe_allow_html=True)
