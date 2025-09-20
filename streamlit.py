@@ -60,39 +60,159 @@ st.set_page_config(
 
 # Custom CSS for better styling
 st.markdown("""
-    <style>
-    .main {
-        padding: 0rem 1rem;
-        background-color: #FFFFFF;
-    }
-    /* Metric cards */
-    .stMetric {
-        background-color: #FFFFFF;
-        padding: 10px;
-        border-radius: 8px;
-        border: 1px solid #E5E7EB; /* gray-200 */
-        box-shadow: 0 1px 2px rgba(0,0,0,0.03);
-        border-left: 4px solid #16A34A; /* primary green accent */
-    }
-    /* Equalize metric card heights */
-    .stMetric, div[data-testid="stMetric"] {
-        height: 130px;
-        min-height: 130px;
-    }
-    div[data-testid="stMetric"] > div {
-        height: 100%;
-        display: flex;
-        flex-direction: column;
-        justify-content: space-between;
-    }
-    /* Ensure column children stretch */
-    div[data-testid="column"] > div {
-        height: 100%;
-    }
-    /* Improve section dividers */
-    hr, .stMarkdown hr { border-color: #E5E7EB; }
-    </style>
-    """, unsafe_allow_html=True)
+      <style>
+      /* Import Geist Sans font faces */
+      @font-face {
+          font-family: 'Geist Sans';
+          src: url('https://cdn.jsdelivr.net/npm/geist@1.0.0/dist/fonts/geist-sans/Geist-Regular.woff2') format('woff2');
+          font-weight: 400;
+          font-style: normal;
+          font-display: swap;
+      }
+      @font-face {
+          font-family: 'Geist Sans';
+          src: url('https://cdn.jsdelivr.net/npm/geist@1.0.0/dist/fonts/geist-sans/Geist-Medium.woff2') format('woff2');
+          font-weight: 500;
+          font-style: normal;
+          font-display: swap;
+      }
+      @font-face {
+          font-family: 'Geist Sans';
+          src: url('https://cdn.jsdelivr.net/npm/geist@1.0.0/dist/fonts/geist-sans/Geist-SemiBold.woff2') format('woff2');
+          font-weight: 600;
+          font-style: normal;
+          font-display: swap;
+      }
+      @font-face {
+          font-family: 'Geist Sans';
+          src: url('https://cdn.jsdelivr.net/npm/geist@1.0.0/dist/fonts/geist-sans/Geist-Bold.woff2') format('woff2');
+          font-weight: 700;
+          font-style: normal;
+          font-display: swap;
+      }
+
+      /* Apply Geist Sans globally */
+      html, body, .stApp, [class*="css"] {
+          font-family: 'Geist Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
+          -webkit-font-smoothing: antialiased;
+          -moz-osx-font-smoothing: grayscale;
+          text-rendering: optimizeLegibility;
+      }
+
+      /* Headings */
+      h1, h2, h3, h4, h5, h6 {
+          font-family: 'Geist Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica Neue', Arial, sans-serif !important;
+          font-weight: 600;
+          letter-spacing: -0.015em;
+      }
+
+      /* Markdown and text */
+      .stMarkdown, .stText, p {
+          font-family: 'Geist Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica Neue', Arial, sans-serif !important;
+          line-height: 1.6;
+          letter-spacing: -0.011em;
+      }
+
+      /* Buttons */
+      .stButton > button {
+          font-family: 'Geist Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica Neue', Arial, sans-serif !important;
+          font-weight: 500;
+      }
+
+      /* Sidebar */
+      [data-testid="stSidebar"], .css-1d391kg, [class*="sidebar"] {
+          font-family: 'Geist Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica Neue', Arial, sans-serif !important;
+      }
+
+      /* Inputs */
+      .stTextInput input,
+      .stSelectbox select,
+      .stTextArea textarea,
+      [data-baseweb="select"] div,
+      [data-baseweb="input"] input {
+          font-family: 'Geist Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica Neue', Arial, sans-serif !important;
+      }
+
+      /* Tables and metrics */
+      .stTable, .dataframe, [data-testid="stMetric"], .stMetric {
+          font-family: 'Geist Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica Neue', Arial, sans-serif !important;
+      }
+
+      /* Tabs */
+      .stTabs [data-baseweb="tab-list"], .stTabs button {
+          font-family: 'Geist Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica Neue', Arial, sans-serif !important;
+      }
+
+      /* Code blocks - Geist Mono (preserve syntax colors) */
+      @font-face {
+          font-family: 'Geist Mono';
+          src: url('https://cdn.jsdelivr.net/npm/geist@1.0.0/dist/fonts/geist-mono/GeistMono-Regular.woff2') format('woff2');
+          font-weight: 400;
+          font-style: normal;
+          font-display: swap;
+      }
+      @font-face {
+          font-family: 'Geist Mono';
+          src: url('https://cdn.jsdelivr.net/npm/geist@1.0.0/dist/fonts/geist-mono/GeistMono-Medium.woff2') format('woff2');
+          font-weight: 500;
+          font-style: normal;
+          font-display: swap;
+      }
+      @font-face {
+          font-family: 'Geist Mono';
+          src: url('https://cdn.jsdelivr.net/npm/geist@1.0.0/dist/fonts/geist-mono/GeistMono-SemiBold.woff2') format('woff2');
+          font-weight: 600;
+          font-style: normal;
+          font-display: swap;
+      }
+      @font-face {
+          font-family: 'Geist Mono';
+          src: url('https://cdn.jsdelivr.net/npm/geist@1.0.0/dist/fonts/geist-mono/GeistMono-Bold.woff2') format('woff2');
+          font-weight: 700;
+          font-style: normal;
+          font-display: swap;
+      }
+      div[data-testid="stCodeBlock"] pre,
+      pre,
+      code,
+      kbd,
+      samp {
+          font-family: 'Geist Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace !important;
+          font-variant-ligatures: none;
+      }
+
+      .main {
+          padding: 0rem 1rem;
+          background-color: #FFFFFF;
+      }
+      /* Metric cards */
+      .stMetric {
+          background-color: #FFFFFF;
+          padding: 10px;
+          border-radius: 8px;
+          border: 1px solid #E5E7EB; /* gray-200 */
+          box-shadow: 0 1px 2px rgba(0,0,0,0.03);
+          border-left: 4px solid #16A34A; /* primary green accent */
+      }
+      /* Equalize metric card heights */
+      .stMetric, div[data-testid="stMetric"] {
+          height: 130px;
+          min-height: 130px;
+      }
+      div[data-testid="stMetric"] > div {
+          height: 100%;
+          display: flex;
+          flex-direction: column;
+          justify-content: space-between;
+      }
+      /* Ensure column children stretch */
+      div[data-testid="column"] > div {
+          height: 100%;
+      }
+      /* Improve section dividers */
+      hr, .stMarkdown hr { border-color: #E5E7EB; }
+      </style>
+      """, unsafe_allow_html=True)
 
 # Title and description
 st.title("🧯 EPCL  Analytics Dashboard")
