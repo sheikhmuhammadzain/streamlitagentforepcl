@@ -140,11 +140,11 @@ st.markdown("""
 
       /* Layout spacing refinements */
       [data-testid="stAppViewContainer"] {
-          padding-top: 0.25rem !important;
+          padding-top: 0rem !important;
       }
       .block-container {
-          padding-top: 0.25rem !important;
-          padding-bottom: 1.0rem !important;
+          padding-top: 0rem !important;
+          padding-bottom: 0.75rem !important;
       }
       h1, h2, h3 {
           margin-top: 0.15rem !important;
@@ -154,9 +154,15 @@ st.markdown("""
           margin-top: 0.15rem !important;
           margin-bottom: 0.15rem !important;
       }
+      /* Collapse the default Streamlit header area */
       header[data-testid="stHeader"] {
           background: transparent;
+          height: 0 !important;
+          min-height: 0 !important;
+          padding: 0 !important;
       }
+      /* Ensure the very first element doesn't add extra top space */
+      .block-container > :first-child { margin-top: 0 !important; }
 
       /* Tabs polish */
       .stTabs [data-baseweb="tab-list"] {
