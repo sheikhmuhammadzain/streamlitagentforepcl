@@ -24,8 +24,8 @@ def add_coordinates_to_df(df: pd.DataFrame, location_coords: dict) -> pd.DataFra
             df['location.1'].astype(str) if 'location.1' in df.columns else (
             df['location'].astype(str) if 'location' in df.columns else pd.Series(df.index.astype(str), index=df.index))))
         h = pd.util.hash_pandas_object(key, index=False).astype(np.uint32)
-        lat_j = ((h % 1000) / 1000.0 - 0.5) * 0.00008
-        lon_j = (((h // 1000) % 1000) / 1000.0 - 0.5) * 0.00008
+        lat_j = ((h % 1000) / 1000.0 - 0.5) * 0.00003
+        lon_j = (((h // 1000) % 1000) / 1000.0 - 0.5) * 0.00003
         df.loc[mask, 'latitude'] = df.loc[mask, 'latitude'].astype(float) + lat_j[mask].values
         df.loc[mask, 'longitude'] = df.loc[mask, 'longitude'].astype(float) + lon_j[mask].values
     return df
@@ -46,7 +46,7 @@ def build_combined_map_html(inc_df: pd.DataFrame, haz_df: pd.DataFrame) -> str:
     else:
         center_lat, center_lon = 24.8607, 67.0011
 
-    m = folium.Map(location=[center_lat, center_lon], zoom_start=15, tiles='CartoDB Positron', control_scale=True, prefer_canvas=True)
+    m = folium.Map(location=[center_lat, center_lon], zoom_start=17, max_zoom=22, tiles='CartoDB Positron', control_scale=True, prefer_canvas=True)
 
     if not inc_coords.empty:
         w = pd.to_numeric(inc_coords.get('severity_score', pd.Series(1.0, index=inc_coords.index)), errors='coerce').fillna(1.0) / 5.0
@@ -62,13 +62,14 @@ def build_combined_map_html(inc_df: pd.DataFrame, haz_df: pd.DataFrame) -> str:
             w = w.loc[haz_coords.index]
         HeatMap(list(zip(haz_coords['latitude'].astype(float), haz_coords['longitude'].astype(float), w.astype(float))), name='Hazards Heat', min_opacity=0.25, radius=18, blur=12, gradient={0.0: '#16a34a', 0.5: '#facc15', 0.75: '#f59e0b', 1.0: '#7f1d1d'}).add_to(m)
 
-    def _labels_layer(df: pd.DataFrame, name: str, color: str):
+    def _labels_layer(df: pd.DataFrame, name: str, color: str, max_labels: int = 20):
         if df.empty:
             return
         key_col = 'location.1' if 'location.1' in df.columns else ('sublocation' if 'sublocation' in df.columns else ('location' if 'location' in df.columns else None))
         if not key_col:
             return
         grp = df.groupby(key_col).agg(lat=('latitude','mean'), lon=('longitude','mean'), count=(key_col,'size')).reset_index()
+        grp = grp.sort_values('count', ascending=False).head(max_labels)
         fg = folium.FeatureGroup(name=name, show=True)
         css = """
         <style>

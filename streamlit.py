@@ -718,7 +718,7 @@ def create_facility_layout_heatmap(incident_df, hazard_df):
         go.Scatter(
             x=incident_heatmap['x'],
             y=incident_heatmap['y'],
-            mode='markers+text',
+            mode='markers',
             marker=dict(
                 size=incident_heatmap['size'],
                 color=incident_heatmap['intensity'],
@@ -730,9 +730,6 @@ def create_facility_layout_heatmap(incident_df, hazard_df):
                 sizeref=2,
                 sizemin=20
             ),
-            text=incident_heatmap['text'],
-            textposition='middle center',
-            textfont=dict(color='white', size=10, family='Arial Black'),
             hovertemplate='<b>%{hovertext}</b><br>Count: %{marker.color}<extra></extra>',
             hovertext=incident_heatmap['hover'],
             showlegend=False
@@ -740,12 +737,61 @@ def create_facility_layout_heatmap(incident_df, hazard_df):
         row=1, col=1
     )
 
+    # Location labels for incidents (always visible, small)
+    fig.add_trace(
+        go.Scatter(
+            x=incident_heatmap['x'],
+            y=incident_heatmap['y'],
+            mode='text',
+            text=incident_heatmap['labels'],
+            textposition='top center',
+            textfont=dict(color='#374151', size=11),
+            hoverinfo='skip',
+            showlegend=False
+        ),
+        row=1, col=1
+    )
+
+    # Add incident counts with dynamic text color for visibility
+    inc_vals = incident_heatmap['intensity']
+    inc_thr = (max(inc_vals) * 0.55) if inc_vals else 0
+    inc_hi_idx = [i for i, v in enumerate(inc_vals) if v >= inc_thr]
+    inc_lo_idx = [i for i, v in enumerate(inc_vals) if v < inc_thr]
+    if inc_hi_idx:
+        fig.add_trace(
+            go.Scatter(
+                x=[incident_heatmap['x'][i] for i in inc_hi_idx],
+                y=[incident_heatmap['y'][i] for i in inc_hi_idx],
+                mode='text',
+                text=[incident_heatmap['text'][i] for i in inc_hi_idx],
+                textposition='middle center',
+                textfont=dict(color='white', size=12, family='Arial Black'),
+                hoverinfo='skip',
+                showlegend=False
+            ),
+            row=1, col=1
+        )
+    if inc_lo_idx:
+        fig.add_trace(
+            go.Scatter(
+                x=[incident_heatmap['x'][i] for i in inc_lo_idx],
+                y=[incident_heatmap['y'][i] for i in inc_lo_idx],
+                mode='text',
+                text=[incident_heatmap['text'][i] for i in inc_lo_idx],
+                textposition='middle center',
+                textfont=dict(color='#111827', size=12, family='Arial Black'),
+                hoverinfo='skip',
+                showlegend=False
+            ),
+            row=1, col=1
+        )
+
     # Add hazard heatmap
     fig.add_trace(
         go.Scatter(
             x=hazard_heatmap['x'],
             y=hazard_heatmap['y'],
-            mode='markers+text',
+            mode='markers',
             marker=dict(
                 size=hazard_heatmap['size'],
                 color=hazard_heatmap['intensity'],
@@ -757,15 +803,61 @@ def create_facility_layout_heatmap(incident_df, hazard_df):
                 sizeref=2,
                 sizemin=20
             ),
-            text=hazard_heatmap['text'],
-            textposition='middle center',
-            textfont=dict(color='white', size=10, family='Arial Black'),
             hovertemplate='<b>%{hovertext}</b><br>Count: %{marker.color}<extra></extra>',
             hovertext=hazard_heatmap['hover'],
             showlegend=False
         ),
         row=1, col=2
     )
+
+    # Location labels for hazards
+    fig.add_trace(
+        go.Scatter(
+            x=hazard_heatmap['x'],
+            y=hazard_heatmap['y'],
+            mode='text',
+            text=hazard_heatmap['labels'],
+            textposition='top center',
+            textfont=dict(color='#374151', size=11),
+            hoverinfo='skip',
+            showlegend=False
+        ),
+        row=1, col=2
+    )
+
+    # Add hazard counts with dynamic text color
+    haz_vals = hazard_heatmap['intensity']
+    haz_thr = (max(haz_vals) * 0.55) if haz_vals else 0
+    haz_hi_idx = [i for i, v in enumerate(haz_vals) if v >= haz_thr]
+    haz_lo_idx = [i for i, v in enumerate(haz_vals) if v < haz_thr]
+    if haz_hi_idx:
+        fig.add_trace(
+            go.Scatter(
+                x=[hazard_heatmap['x'][i] for i in haz_hi_idx],
+                y=[hazard_heatmap['y'][i] for i in haz_hi_idx],
+                mode='text',
+                text=[hazard_heatmap['text'][i] for i in haz_hi_idx],
+                textposition='middle center',
+                textfont=dict(color='white', size=12, family='Arial Black'),
+                hoverinfo='skip',
+                showlegend=False
+            ),
+            row=1, col=2
+        )
+    if haz_lo_idx:
+        fig.add_trace(
+            go.Scatter(
+                x=[hazard_heatmap['x'][i] for i in haz_lo_idx],
+                y=[hazard_heatmap['y'][i] for i in haz_lo_idx],
+                mode='text',
+                text=[hazard_heatmap['text'][i] for i in haz_lo_idx],
+                textposition='middle center',
+                textfont=dict(color='#111827', size=12, family='Arial Black'),
+                hoverinfo='skip',
+                showlegend=False
+            ),
+            row=1, col=2
+        )
 
     # Update layout for facility appearance
     fig.update_xaxes(
@@ -801,7 +893,7 @@ def create_facility_layout_heatmap(incident_df, hazard_df):
         showlegend=False,
         plot_bgcolor='#f8f9fa',
         paper_bgcolor='white',
-        margin=dict(t=60, l=20, r=20, b=20)
+        margin=dict(t=60, l=40, r=40, b=40)
     )
 
     return fig
@@ -843,7 +935,7 @@ def create_zone_heatmap_data(df, zones, data_type):
         zone_counts[zone_name]['risk_sum'] = risk_sum
 
     # Prepare data for plotting
-    x, y, intensity, size, text, hover = [], [], [], [], [], []
+    x, y, intensity, size, text, hover, labels = [], [], [], [], [], [], []
 
     for zone_name, data in zone_counts.items():
         x.append(data['x'])
@@ -855,10 +947,12 @@ def create_zone_heatmap_data(df, zones, data_type):
         avg_severity = data['severity_sum'] / data['count'] if data['count'] > 0 else 0
         avg_risk = data['risk_sum'] / data['count'] if data['count'] > 0 else 0
         hover.append(f"{zone_name}<br>Area: {data['area']}<br>{data_type}: {data['count']}<br>Avg Severity: {avg_severity:.1f}<br>Avg Risk: {avg_risk:.1f}")
+        labels.append(zone_name)
 
     return {
         'x': x, 'y': y, 'intensity': intensity,
-        'size': size, 'text': text, 'hover': hover
+        'size': size, 'text': text, 'hover': hover,
+        'labels': labels,
     }
 
 def create_folium_heatmap(df, map_title, color_gradient, max_points: int = 5000):

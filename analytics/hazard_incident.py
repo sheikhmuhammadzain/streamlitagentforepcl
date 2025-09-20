@@ -265,10 +265,28 @@ class HazardIncidentAnalyzer:
             link_colors.append('rgba(144, 238, 144, 0.4)')
 
         fig = go.Figure(data=[go.Sankey(
-            node=dict(pad=15, thickness=20, line=dict(color="black", width=0.5), label=labels, color=colors, hovertemplate='%{label}<br>Count: %{value}<extra></extra>'),
-            link=dict(source=source, target=target, value=value, color=link_colors, hovertemplate='Flow: %{value}<br>From: %{source.label}<br>To: %{target.label}<extra></extra>')
+            node=dict(
+                pad=20,
+                thickness=24,
+                line=dict(color="#374151", width=1.2),
+                label=labels,
+                color=colors,
+                hovertemplate='%{label}<br>Count: %{value}<extra></extra>'
+            ),
+            link=dict(
+                source=source,
+                target=target,
+                value=value,
+                color=link_colors,
+                hovertemplate='Flow: %{value}<br>From: %{source.label}<br>To: %{target.label}<extra></extra>'
+            )
         )])
-        fig.update_layout(title="Hazard to Incident Flow Analysis", height=600, font_size=12)
+        fig.update_layout(
+            title="Hazard to Incident Flow Analysis",
+            height=600,
+            font=dict(family="Segoe UI, Arial, sans-serif", size=14, color="#111827"),
+            paper_bgcolor="white"
+        )
         return fig
 
     def create_department_conversion_matrix(self) -> go.Figure:
