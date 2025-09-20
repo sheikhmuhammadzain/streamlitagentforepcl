@@ -2085,8 +2085,8 @@ if uploaded_file is not None or use_example:
                     st.code(code_resp)
                     st.stop()
                 if show_code:
-                    st.markdown("### Generated code")
-                    st.code(code_block, language="python")
+                    with st.expander("Generated code", expanded=False):
+                        st.code(code_block, language="python")
                 with st.spinner("Running code on filtered data..."):
                     dfs_payload = None
                     if multi_sheets:
