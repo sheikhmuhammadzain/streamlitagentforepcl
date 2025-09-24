@@ -1757,12 +1757,10 @@ if uploaded_file is not None or use_example:
         filtered_df = apply_filters(df, schema, date_range, statuses, departments, locations, categories)
 
         # Tabs (added Overall across-sheets view + Advanced Analytics + Hazard-Incident Analysis)
-        tab0, tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+        tab0, tab1, tab2, tab3, tab4, tab5 = st.tabs([
             "🌐 Overall",
             "📊 Overview",
             "🔎 Deep Dive",
-            "📋 Data Table",
-            "📑 Summary Report",
             "🧠 Data Agent",
             "🚀 Advanced Analytics",
             "🔄 Hazard-Incident Analysis",
@@ -1881,7 +1879,7 @@ if uploaded_file is not None or use_example:
                 'Type': ['Incidents', 'Hazards', 'Relationships'],
                 'Count': [incident_count, hazard_count, relationships_count]
             })
-            fig_overall = px.bar(summary_df, x='Type', y='Count', title='Overall Counts Across Workbook')
+            fig_overall = px.bar(summary_df, x='Type', y='Count', title='Overall Counts Across')
             fig_overall.update_layout(height=360)
             st.plotly_chart(fig_overall, width='stretch')
 
@@ -1891,68 +1889,6 @@ if uploaded_file is not None or use_example:
                 st.plotly_chart(gauge_fig, use_container_width=True)
             except Exception:
                 pass
-
-            # Linked vs Unlinked (stacked) using Relationships sheet
-            st.subheader("🔗 Linked vs Unlinked Analysis")
-            stacked_rows = []
-
-            # Identify id columns in Hazard and Incident sheets
-            hazard_id_col = None
-            incident_id_col = None
-            if df_haz is not None:
-                for c in df_haz.columns:
-                    lc = str(c).lower()
-                    if ('hazard' in lc) and ('id' in lc):
-                        hazard_id_col = c
-                        break
-            if df_inc is not None:
-                for c in df_inc.columns:
-                    lc = str(c).lower()
-                    if ('incident' in lc) and ('id' in lc):
-                        incident_id_col = c
-                        break
-
-            # Build linked/unlinked counts for Hazards
-            if df_haz is not None and hazard_id_col and df_rel is not None:
-                linked_haz_ids = set()
-                if haz_rel_col:
-                    linked_haz_ids = set(pd.Series(df_rel[haz_rel_col]).dropna().astype(str).unique())
-                total_haz_ids = set(pd.Series(df_haz[hazard_id_col]).dropna().astype(str).unique())
-                linked_haz_count = len(total_haz_ids.intersection(linked_haz_ids))
-                unlinked_haz_count = max(0, len(total_haz_ids) - linked_haz_count)
-                stacked_rows += [
-                    {"Type": "Hazards", "Link": "Linked", "Count": linked_haz_count},
-                    {"Type": "Hazards", "Link": "Unlinked", "Count": unlinked_haz_count},
-                ]
-            elif df_haz is not None:
-                # Fallback: no IDs detected; show total as Unlinked-only
-                stacked_rows.append({"Type": "Hazards", "Link": "Total", "Count": hazard_count})
-
-            # Build linked/unlinked counts for Incidents
-            if df_inc is not None and incident_id_col and df_rel is not None:
-                linked_inc_ids = set()
-                if inc_rel_col:
-                    linked_inc_ids = set(pd.Series(df_rel[inc_rel_col]).dropna().astype(str).unique())
-                total_inc_ids = set(pd.Series(df_inc[incident_id_col]).dropna().astype(str).unique())
-                linked_inc_count = len(total_inc_ids.intersection(linked_inc_ids))
-                unlinked_inc_count = max(0, len(total_inc_ids) - linked_inc_count)
-                stacked_rows += [
-                    {"Type": "Incidents", "Link": "Linked", "Count": linked_inc_count},
-                    {"Type": "Incidents", "Link": "Unlinked", "Count": unlinked_inc_count},
-                ]
-            elif df_inc is not None:
-                stacked_rows.append({"Type": "Incidents", "Link": "Total", "Count": incident_count})
-
-            if stacked_rows:
-                stacked_df = pd.DataFrame(stacked_rows)
-                fig_stack = px.bar(
-                    stacked_df, x="Type", y="Count", color="Link",
-                    barmode="stack", title="Linked vs Unlinked by Type"
-                )
-                fig_stack.update_layout(height=360)
-                st.plotly_chart(fig_stack, width='stretch')
-            else:
-                st.info("No sufficient ID columns detected to compute linked vs unlinked.")
 
             # 🔥 Hottest Zones Summary
             if df_inc is not None or df_haz is not None:
@@ -2093,6 +2029,14 @@ if uploaded_file is not None or use_example:
                     st.plotly_chart(fig_risk, width='stretch')
 
             # Timeliness metrics
+            x_max = st.slider(
+                "Max days for histograms",
+                min_value=10,
+                max_value=1000,
+                value=100,
+                step=10,
+                help="Adjust x-axis max for both Reporting Delay and Resolution Time histograms"
+            )
             col3, col4 = st.columns(2)
             with col3:
                 rd = schema.get('reporting_delay_col')
@@ -2103,7 +2047,9 @@ if uploaded_file is not None or use_example:
                     with colA: st.metric("Avg", _fmt_num(_rd.mean()))
                     with colB: st.metric("P90", _fmt_num(_rd.quantile(0.9)))
                     with colC: st.metric("Max", _fmt_num(_rd.max()))
-                    st.plotly_chart(px.histogram(_rd.dropna(), nbins=30, title="Reporting Delay Histogram"), width='stretch')
+                    fig_rd = px.histogram(_rd.dropna(), nbins=30, title="Reporting Delay Histogram")
+                    fig_rd.update_xaxes(range=[0, x_max])
+                    st.plotly_chart(fig_rd, width='stretch')
             with col4:
                 rt = schema.get('resolution_time_col')
                 if rt and rt in filtered_df.columns and filtered_df[rt].notna().any():
@@ -2113,7 +2059,9 @@ if uploaded_file is not None or use_example:
                     with colA: st.metric("Avg", _fmt_num(_rt.mean()))
                     with colB: st.metric("P90", _fmt_num(_rt.quantile(0.9)))
                     with colC: st.metric("Max", _fmt_num(_rt.max()))
-                    st.plotly_chart(px.histogram(_rt.dropna(), nbins=30, title="Resolution Time Histogram"), width='stretch')
+                    fig_rt = px.histogram(_rt.dropna(), nbins=30, title="Resolution Time Histogram")
+                    fig_rt.update_xaxes(range=[0, x_max])
+                    st.plotly_chart(fig_rt, width='stretch')
 
             # Data quality flags
             flags = schema.get('flags', [])
@@ -2125,99 +2073,8 @@ if uploaded_file is not None or use_example:
                     with cols[i]:
                         st.metric(fl.replace('_', ' ').title(), f"{int(cnt):,}")
 
-        # Tab 3: Data Table
+        # Tab 3: AI Agent
         with tab3:
-            st.header("📋 Data Table")
-            search = st.text_input("🔍 Search in data", "")
-            if search:
-                mask = filtered_df.apply(lambda row: row.astype(str).str.contains(search, case=False, na=False).any(), axis=1)
-                display_df = filtered_df[mask]
-            else:
-                display_df = filtered_df
-            st.info(f"Showing {len(display_df):,} rows")
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                show_na = st.checkbox("Show rows with missing values only", False)
-            with col2:
-                show_recent = st.checkbox("Sort by latest date first", True)
-            with col3:
-                rows_to_show = st.selectbox("Rows per page", [25, 50, 100, 500], index=1)
-            if show_na:
-                display_df = display_df[display_df.isna().any(axis=1)]
-            dcol = schema.get('date_col')
-            if show_recent and dcol and dcol in display_df.columns:
-                display_df = display_df.sort_values(dcol, ascending=False, na_position='last')
-            total_pages = len(display_df) // rows_to_show + (1 if len(display_df) % rows_to_show > 0 else 0)
-            page = st.number_input("Page", min_value=1, max_value=max(1, total_pages), value=1)
-            start_idx = (page - 1) * rows_to_show
-            end_idx = min(start_idx + rows_to_show, len(display_df))
-            st.dataframe(display_df.iloc[start_idx:end_idx], use_container_width=True, height=600)
-            # Download
-            csv = filtered_df.to_csv(index=False)
-            st.download_button(
-                label="📥 Download filtered data as CSV",
-                data=csv,
-                file_name=f"filtered_{selected_sheet.lower()}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                mime="text/csv"
-            )
-
-        # Tab 4: Summary Report
-        with tab4:
-            st.header("📑 Summary Report")
-            dcol = schema.get('date_col')
-            if dcol and dcol in filtered_df.columns and filtered_df[dcol].notna().any():
-                start_time = pd.to_datetime(filtered_df[dcol]).min()
-                end_time = pd.to_datetime(filtered_df[dcol]).max()
-                duration_days = (end_time - start_time).days if (pd.notna(end_time) and pd.notna(start_time)) else 0
-            else:
-                start_time = end_time = None
-                duration_days = 0
-
-            sev = schema.get('severity_col')
-            rk = schema.get('risk_col')
-            costc = schema.get('cost_col')
-            mhc = schema.get('manhours_col')
-
-            report_lines = [
-                f"# HSE DATA ANALYSIS REPORT – {selected_sheet}",
-                f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-                "",
-                "## BASIC STATISTICS",
-                f"- Total Records: {len(filtered_df):,}",
-            ]
-            if start_time is not None and end_time is not None:
-                report_lines += [
-                    f"- Time Period: {start_time.strftime('%Y-%m-%d')} to {end_time.strftime('%Y-%m-%d')}",
-                    f"- Duration: {duration_days} days",
-                ]
-            if sev and sev in filtered_df.columns and filtered_df[sev].notna().any():
-                report_lines.append(f"- Avg Severity: {filtered_df[sev].mean():.2f}")
-            if rk and rk in filtered_df.columns and filtered_df[rk].notna().any():
-                report_lines.append(f"- Avg Risk: {filtered_df[rk].mean():.2f}")
-            if costc and costc in filtered_df.columns:
-                report_lines.append(f"- Est. Cost Impact (sum): {_fmt_num(filtered_df[costc].sum())}")
-            if mhc and mhc in filtered_df.columns:
-                report_lines.append(f"- Est. Manhours (sum): {_fmt_num(filtered_df[mhc].sum())}")
-
-            # Top items
-            for label, col in [("STATUS", schema.get('status_col')), ("CATEGORY", schema.get('category_col')), ("DEPARTMENT", schema.get('dept_col')), ("LOCATION", schema.get('loc_col'))]:
-                if col and col in filtered_df.columns:
-                    report_lines.append("")
-                    report_lines.append(f"## TOP {label}")
-                    for i, (val, count) in enumerate(filtered_df[col].value_counts().head(5).items(), 1):
-                        report_lines.append(f"{i}. {val}: {count:,} ({count/len(filtered_df)*100:.1f}%)")
-
-            report_text = "\n".join(report_lines)
-            st.markdown(report_text)
-            st.download_button(
-                label="📥 Download Report as Markdown",
-                data=report_text,
-                file_name=f"hse_report_{selected_sheet.lower()}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md",
-                mime="text/markdown"
-            )
-
-        # Tab 5: AI Agent
-        with tab5:
             st.header("🧠 Data Agent")
             st.caption("Ask a question. The agent will generate Python, run it on the filtered data, then provide a prescriptive summary.")
             question = st.text_area("Your question about the filtered data", placeholder="e.g., Which departments have the highest risk and what should we focus on?")
@@ -2325,8 +2182,8 @@ if uploaded_file is not None or use_example:
                 st.markdown("### Prescriptive summary")
                 st.markdown(summary_resp)
 
-        # Tab 6: Advanced Analytics
-        with tab6:
+        # Tab 4: Advanced Analytics
+        with tab4:
             st.header("Advanced  Analytics")
             # Gather common DataFrames
             incident_df = get_sheet_df(workbook, 'incident')
@@ -2345,7 +2202,6 @@ if uploaded_file is not None or use_example:
                     "Word Clouds",
                     "Data Quality",
                     "Predictive Analytics",
-                    "PSM Analysis",
                     "Hazard Violation Analysis",
                 ]
             )
@@ -2360,11 +2216,6 @@ if uploaded_file is not None or use_example:
                 base_df = incident_df if incident_df is not None else filtered_df
                 fig2 = create_hse_performance_index(base_df)
                 st.plotly_chart(fig2, width='stretch')
-
-                                                                                                                                                                            # # Row 3: Full-width Incident management funnel
-                                                                                                                                                                            # st.markdown("---")
-                                                                                                                                                                            # fig3 = create_incident_action_funnel(incident_df, relationships_df)
-                                                                                                                                                                            # st.plotly_chart(fig3, width='stretch')
 
             elif analysis_category == "Risk Analysis":
                 # Consequence matrix (incident)
@@ -2417,16 +2268,12 @@ if uploaded_file is not None or use_example:
                 fig_cost = create_cost_prediction_analysis(incident_df if incident_df is not None else filtered_df)
                 st.plotly_chart(fig_cost, width='stretch')
 
-            elif analysis_category == "PSM Analysis":
-                fig_psm = create_psm_breakdown(incident_df)
-                st.plotly_chart(fig_psm, width='stretch')
-
             elif analysis_category == "Hazard Violation Analysis":
                 fig_vi = create_violation_analysis(hazard_df)
                 st.plotly_chart(fig_vi, width='stretch')
 
-        # Tab 7: Hazard-Incident Analysis (modular)
-        with tab7:
+        # Tab 5: Hazard-Incident Analysis (modular)
+        with tab5:
             st.header("🔄 Hazard-Incident Analysis")
             render_conversion_page(workbook)
 
