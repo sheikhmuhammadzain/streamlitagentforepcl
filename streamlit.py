@@ -52,7 +52,7 @@ px.defaults.color_continuous_scale = px.colors.sequential.Greens
 
 # Page configuration
 st.set_page_config(
-    page_title="EPCL Analytics Dashboard",
+    page_title="Safety Co-pilot",
     page_icon="🧯",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -250,7 +250,7 @@ st.markdown("""
       """, unsafe_allow_html=True)
 
 # Title and description
-st.title("🧯 EPCL  Analytics Dashboard")
+st.title("Safety Co-pilot")
 st.markdown("### Incidents, Hazards, Audits, Inspections – Interactive Analysis")
 
 # Sidebar for file upload and filters
@@ -546,30 +546,30 @@ def create_hse_performance_index(df):
     )
     return fig
 
-def create_incident_action_funnel(incident_df, relationships_df):
-    if incident_df is None:
-        return go.Figure()
-    inc_total = len(incident_df)
-    invest_started = incident_df['entered_investigation'].notna().sum() if 'entered_investigation' in incident_df.columns else 0
-    if 'root_cause_is_missing' in incident_df.columns:
-        rc = incident_df['root_cause_is_missing']
-        # Treat NaN as missing (1); identified when value is 0/False
-        rc_num = pd.to_numeric(rc, errors='coerce').fillna(1).astype(int)
-        root_identified = (rc_num == 0).sum()
-    else:
-        root_identified = 0
-    closed_inc = (incident_df['status'].astype(str).str.lower() == 'closed').sum() if 'status' in incident_df.columns else 0
-    with_actions = 0
-    if relationships_df is not None and {'source_type','source_id','target_type'}.issubset(relationships_df.columns):
-        with_actions = relationships_df[relationships_df['source_type'].astype(str).str.lower().eq('incident')]['source_id'].nunique()
-    fig = go.Figure(go.Funnel(
-        y=['Total Incidents','Investigation Started','Root Cause Identified','Corrective Actions Generated','Incidents Closed'],
-        x=[inc_total, invest_started, root_identified, with_actions, closed_inc],
-        textposition='inside', textinfo='value+percent initial',
-        marker={'color':['#16A34A','#34D399','#A7F3D0','#F59E0B','#065F46']}
-    ))
-    fig.update_layout(title='Incident Management Funnel')
-    return fig
+# def create_incident_action_funnel(incident_df, relationships_df):
+#     if incident_df is None:
+#         return go.Figure()
+#     inc_total = len(incident_df)
+#     invest_started = incident_df['entered_investigation'].notna().sum() if 'entered_investigation' in incident_df.columns else 0
+#     if 'root_cause_is_missing' in incident_df.columns:
+#         rc = incident_df['root_cause_is_missing']
+#         # Treat NaN as missing (1); identified when value is 0/False
+#         rc_num = pd.to_numeric(rc, errors='coerce').fillna(1).astype(int)
+#         root_identified = (rc_num == 0).sum()
+#     else:
+#         root_identified = 0
+#     closed_inc = (incident_df['status'].astype(str).str.lower() == 'closed').sum() if 'status' in incident_df.columns else 0
+#     with_actions = 0
+#     if relationships_df is not None and {'source_type','source_id','target_type'}.issubset(relationships_df.columns):
+#         with_actions = relationships_df[relationships_df['source_type'].astype(str).str.lower().eq('incident')]['source_id'].nunique()
+#     fig = go.Figure(go.Funnel(
+#         y=['Total Incidents','Investigation Started','Root Cause Identified','Corrective Actions Generated','Incidents Closed'],
+#         x=[inc_total, invest_started, root_identified, with_actions, closed_inc],
+#         textposition='inside', textinfo='value+percent initial',
+#         marker={'color':['#16A34A','#34D399','#A7F3D0','#F59E0B','#065F46']}
+#     ))
+#     fig.update_layout(title='Incident Management Funnel')
+#     return fig
 
 def create_risk_calendar_heatmap(df):
     if df is None or 'occurrence_date' not in df.columns or 'department' not in df.columns or 'risk_score' not in df.columns:
@@ -1763,7 +1763,7 @@ if uploaded_file is not None or use_example:
             "🔎 Deep Dive",
             "📋 Data Table",
             "📑 Summary Report",
-            "🧠 EPCL Data Agent",
+            "🧠 Data Agent",
             "🚀 Advanced Analytics",
             "🔄 Hazard-Incident Analysis",
         ])
@@ -2218,7 +2218,7 @@ if uploaded_file is not None or use_example:
 
         # Tab 5: AI Agent
         with tab5:
-            st.header("🧠 EPCL Data Agent")
+            st.header("🧠 Data Agent")
             st.caption("Ask a question. The agent will generate Python, run it on the filtered data, then provide a prescriptive summary.")
             question = st.text_area("Your question about the filtered data", placeholder="e.g., Which departments have the highest risk and what should we focus on?")
             with st.expander("⚙️ Agent settings", expanded=False):
@@ -2327,7 +2327,7 @@ if uploaded_file is not None or use_example:
 
         # Tab 6: Advanced Analytics
         with tab6:
-            st.header("Advanced EPCL Analytics")
+            st.header("Advanced  Analytics")
             # Gather common DataFrames
             incident_df = get_sheet_df(workbook, 'incident')
             hazard_df = get_sheet_df(workbook, 'hazard')
@@ -2361,10 +2361,10 @@ if uploaded_file is not None or use_example:
                 fig2 = create_hse_performance_index(base_df)
                 st.plotly_chart(fig2, width='stretch')
 
-                # Row 3: Full-width Incident management funnel
-                st.markdown("---")
-                fig3 = create_incident_action_funnel(incident_df, relationships_df)
-                st.plotly_chart(fig3, width='stretch')
+                                                                                                                                                                            # # Row 3: Full-width Incident management funnel
+                                                                                                                                                                            # st.markdown("---")
+                                                                                                                                                                            # fig3 = create_incident_action_funnel(incident_df, relationships_df)
+                                                                                                                                                                            # st.plotly_chart(fig3, width='stretch')
 
             elif analysis_category == "Risk Analysis":
                 # Consequence matrix (incident)
@@ -2462,6 +2462,6 @@ else:
 st.markdown("---")
 st.markdown("""
     <div style='text-align: center'>
-        <p>EPCL Analytics Dashboard v1.0 </p>
+        <p>Safety Co-pilot v1.0 </p>
     </div>
     """, unsafe_allow_html=True)
