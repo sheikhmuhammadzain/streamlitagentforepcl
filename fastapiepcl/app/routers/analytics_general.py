@@ -1,7 +1,10 @@
 from fastapi import APIRouter, Query
 from fastapi.responses import JSONResponse
+import json
+import re
 import numpy as np
 import pandas as pd
+from typing import Optional, List, Dict
 
 from ..models.schemas import (
     PlotlyFigureResponse,
@@ -19,9 +22,32 @@ from ..services import plots as plot_service
 from ..services.json_utils import to_native_json
 from ..services.agent import ask_openai
 from ..services.excel import payload_to_df
+from ..services.insights_generator import PlotlyInsightsGenerator, InsightType
 
 
 router = APIRouter(prefix="/analytics", tags=["analytics"])
+
+
+def _resolve_column(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
+    if df is None or df.empty:
+        return None
+    colmap = {str(c).strip().lower(): c for c in df.columns}
+    for cand in candidates:
+        k = str(cand).strip().lower()
+        if k in colmap:
+            return colmap[k]
+    # try relaxed contains match
+    for cand in candidates:
+        k = str(cand).strip().lower()
+        for lk, orig in colmap.items():
+            if k in lk:
+                return orig
+    return None
+
+
+def _to_month_period(series: pd.Series) -> pd.Series:
+    dt = pd.to_datetime(series, errors='coerce')
+    return dt.dt.to_period('M').astype(str)
 
 
 @router.get("/hse-scorecard", response_model=PlotlyFigureResponse)
@@ -34,15 +60,293 @@ async def hse_scorecard():
     return JSONResponse(content={"figure": to_native_json(fig.to_plotly_json())})
 
 
+# ----------------------- DATA (JSON) ENDPOINTS FOR FRONTEND --------------------
+
+@router.get("/data/incident-trend")
+async def data_incident_trend(dataset: str = Query("incident")):
+    df = get_incident_df() if (dataset or "incident").lower() == "incident" else get_hazard_df()
+    if df is None or df.empty:
+        return JSONResponse(content={"labels": [], "series": []})
+    date_col = _resolve_column(df, ["occurrence_date", "date of occurrence", "date reported", "date entered"]) or df.columns[0]
+    months = _to_month_period(df[date_col])
+    counts = months.value_counts().sort_index()
+    return JSONResponse(content={
+        "labels": counts.index.tolist(),
+        "series": [{"name": "Count", "data": counts.values.astype(int).tolist()}],
+    })
+
+
+@router.get("/data/incident-type-distribution")
+async def data_incident_type_distribution(dataset: str = Query("incident")):
+    df = get_incident_df() if (dataset or "incident").lower() == "incident" else get_hazard_df()
+    if df is None or df.empty:
+        return JSONResponse(content={"labels": [], "series": []})
+    type_col = _resolve_column(df, ["incident type(s)", "category", "accident type"]) or df.columns[0]
+    vc = df[type_col].astype(str).str.split(",").explode().str.strip()
+    counts = vc.value_counts().head(20)
+    return JSONResponse(content={
+        "labels": counts.index.tolist(),
+        "series": [{"name": "Count", "data": counts.values.astype(int).tolist()}],
+    })
+
+
+@router.get("/data/root-cause-pareto")
+async def data_root_cause_pareto(dataset: str = Query("incident")):
+    df = get_incident_df() if (dataset or "incident").lower() == "incident" else get_hazard_df()
+    if df is None or df.empty:
+        return JSONResponse(content={"labels": [], "bars": [], "cum_pct": []})
+    rc_col = _resolve_column(df, ["root cause"]) or df.columns[0]
+    vc = df[rc_col].astype(str).str.split(",").explode().str.strip()
+    counts = vc.value_counts()
+    counts = counts[counts.index.notna()]
+    counts = counts.head(15)
+    total = counts.sum() if counts.sum() > 0 else 1
+    cum = counts.cumsum() / total * 100
+    return JSONResponse(content={
+        "labels": counts.index.tolist(),
+        "bars": counts.values.astype(int).tolist(),
+        "cum_pct": cum.round(2).values.tolist(),
+    })
+
+
+@router.get("/data/injury-severity-pyramid")
+async def data_injury_severity_pyramid(dataset: str = Query("incident")):
+    df = get_incident_df() if (dataset or "incident").lower() == "incident" else get_hazard_df()
+    if df is None or df.empty:
+        return JSONResponse(content={"labels": [], "series": []})
+    sev_col = _resolve_column(df, ["injury classification", "actual consequence (incident)", "relevant consequence (incident)"]) or df.columns[0]
+    order = ["Near Miss", "First Aid", "Recordable", "Lost Time", "Fatality"]
+    vc = df[sev_col].astype(str).value_counts()
+    labels = []
+    data = []
+    for o in order:
+        if o in vc.index:
+            labels.append(o)
+            data.append(int(vc[o]))
+    # append remaining categories
+    for cat, val in vc.items():
+        if cat not in labels:
+            labels.append(str(cat))
+            data.append(int(val))
+    return JSONResponse(content={"labels": labels, "series": [{"name": "Count", "data": data}]})
+
+
+@router.get("/data/department-month-heatmap")
+async def data_department_month_heatmap(dataset: str = Query("incident")):
+    df = get_incident_df() if (dataset or "incident").lower() == "incident" else get_hazard_df()
+    if df is None or df.empty:
+        return JSONResponse(content={"x": [], "y": [], "z": [], "metric": "count"})
+    dep_col = _resolve_column(df, ["department"]) or _resolve_column(df, ["section"]) or df.columns[0]
+    date_col = _resolve_column(df, ["occurrence_date", "date of occurrence", "date reported"]) or df.columns[0]
+    months = _to_month_period(df[date_col])
+    metric_col = _resolve_column(df, ["risk_score", "severity_score"])  # optional
+    cp = pd.DataFrame({"department": df[dep_col].astype(str), "month": months})
+    if metric_col is not None:
+        cp["value"] = pd.to_numeric(df[metric_col], errors='coerce')
+        pivot = cp.pivot_table(values="value", index="department", columns="month", aggfunc="mean")
+        metric = "avg"
+    else:
+        cp["value"] = 1
+        pivot = cp.pivot_table(values="value", index="department", columns="month", aggfunc="count")
+        metric = "count"
+    x = [str(c) for c in pivot.columns]
+    y = [str(i) for i in pivot.index]
+    z = pivot.fillna(0).to_numpy().tolist()
+    return JSONResponse(content={"x": x, "y": y, "z": z, "metric": metric})
+
+
+@router.get("/data/consequence-gap")
+async def data_consequence_gap(dataset: str = Query("incident")):
+    df = get_incident_df() if (dataset or "incident").lower() == "incident" else get_hazard_df()
+    if df is None or df.empty:
+        return JSONResponse(content={"rows": [], "cols": [], "z": []})
+    actual = _resolve_column(df, ["actual consequence (incident)"]) or df.columns[0]
+    worst = _resolve_column(df, ["worst case consequence (incident)"]) or df.columns[0]
+    ct = pd.crosstab(df[actual], df[worst])
+    return JSONResponse(content={
+        "rows": [str(i) for i in ct.index],
+        "cols": [str(c) for c in ct.columns],
+        "z": ct.fillna(0).to_numpy().astype(int).tolist(),
+    })
+
+
+@router.get("/data/audit-status-distribution")
+async def data_audit_status_distribution():
+    df = get_audit_df()
+    if df is None or df.empty:
+        return JSONResponse(content={"labels": [], "series": []})
+    status_col = _resolve_column(df, ["audit status"]) or df.columns[0]
+    vc = df[status_col].astype(str).value_counts()
+    return JSONResponse(content={
+        "labels": vc.index.tolist(),
+        "series": [{"name": "Count", "data": vc.values.astype(int).tolist()}],
+    })
+
+
+@router.get("/data/audit-rating-trend")
+async def data_audit_rating_trend():
+    df = get_audit_df()
+    if df is None or df.empty:
+        return JSONResponse(content={"labels": [], "series": []})
+    date_col = _resolve_column(df, ["start_date", "start date"]) or df.columns[0]
+    rating_col = _resolve_column(df, ["audit rating"]) or None
+    if rating_col is None:
+        return JSONResponse(content={"labels": [], "series": []})
+    months = _to_month_period(df[date_col])
+    vals = pd.to_numeric(df[rating_col], errors='coerce')
+    grp = pd.DataFrame({"month": months, "rating": vals}).groupby("month").mean().sort_index()
+    return JSONResponse(content={
+        "labels": grp.index.tolist(),
+        "series": [{"name": "Avg Rating", "data": grp["rating"].round(2).fillna(0).tolist()}],
+    })
+
+
+@router.get("/data/inspection-coverage")
+async def data_inspection_coverage():
+    df = get_inspection_df()
+    if df is None or df.empty:
+        return JSONResponse(content={"labels": [], "series": []})
+    date_col = _resolve_column(df, ["start_date", "start date"]) or df.columns[0]
+    status_col = _resolve_column(df, ["audit status"]) or df.columns[0]
+    months = _to_month_period(df[date_col])
+    tmp = pd.DataFrame({"month": months, "status": df[status_col].astype(str)})
+    pivot = tmp.pivot_table(index="month", columns="status", values="status", aggfunc="count").fillna(0).astype(int)
+    pivot = pivot.sort_index()
+    labels = pivot.index.tolist()
+    series = [{"name": str(col), "data": pivot[col].tolist()} for col in pivot.columns]
+    return JSONResponse(content={"labels": labels, "series": series})
+
+
+@router.get("/data/inspection-top-findings")
+async def data_inspection_top_findings():
+    df = get_inspection_df()
+    if df is None or df.empty:
+        return JSONResponse(content={"labels": [], "series": []})
+    cat_col = _resolve_column(df, ["checklist category", "finding"]) or df.columns[0]
+    s = df[cat_col]
+    # Drop NaN and trim
+    s = s.dropna().astype(str).str.strip()
+    # Remove placeholders: NaN/N.A forms and generic 'no ...' statements
+    na_pat = re.compile(r"^(n/?a|nan|null|none|not\s*applicable)(\s*;\s*(n/?a|nan|null|none|not\s*applicable))*$", re.IGNORECASE)
+    no_pat = re.compile(r"^(no(\s+|$)|no\s+(finding|findings|observation|observations|deficien(?:cy|cies)|issue|issues|recommendation(?:s)?)(\b|\s|$))", re.IGNORECASE)
+    def _keep(val: str) -> bool:
+        v = val.strip()
+        if not v:
+            return False
+        if na_pat.match(v):
+            return False
+        if no_pat.search(v):
+            return False
+        return True
+    s = s[s.map(_keep)]
+    vc = s.value_counts().head(20)
+    return JSONResponse(content={
+        "labels": vc.index.tolist(),
+        "series": [{"name": "Count", "data": vc.values.astype(int).tolist()}],
+    })
+
+
+@router.get("/data/incident-cost-trend")
+async def data_incident_cost_trend():
+    df = get_incident_df()
+    if df is None or df.empty:
+        return JSONResponse(content={"labels": [], "series": []})
+    date_col = _resolve_column(df, ["occurrence_date", "date of occurrence", "date reported"]) or df.columns[0]
+    cost_col = _resolve_column(df, ["total cost", "estimated_cost_impact"]) or None
+    if cost_col is None:
+        return JSONResponse(content={"labels": [], "series": []})
+    months = _to_month_period(df[date_col])
+    vals = pd.to_numeric(df[cost_col], errors='coerce')
+    grp = pd.DataFrame({"month": months, "cost": vals}).groupby("month").sum().sort_index()
+    return JSONResponse(content={
+        "labels": grp.index.tolist(),
+        "series": [{"name": "Total Cost", "data": grp["cost"].round(0).fillna(0).astype(float).tolist()}],
+    })
+
+
+@router.get("/data/ppe-violation-analysis")
+async def data_ppe_violation_analysis():
+    df = get_incident_df()
+    if df is None or df.empty:
+        return JSONResponse(content={"labels": [], "series": []})
+    viol_col = _resolve_column(df, ["violation type (incident)", "policy violation", "cardinal rule violation"]) or None
+    ppe_col = _resolve_column(df, ["ppe worn"]) or None
+    if viol_col is None or ppe_col is None:
+        return JSONResponse(content={"labels": [], "series": []})
+    # Normalize PPE worn values to Yes/No/Other
+    ppe = df[ppe_col].astype(str).str.strip().str.lower()
+    ppe_norm = ppe.where(~ppe.isin(["yes", "no"]) , ppe)
+    ppe_norm = ppe_norm.replace({"true": "yes", "false": "no"})
+    vt = df[viol_col].astype(str).str.split(',').explode().str.strip()
+    top_v = vt.value_counts().head(10).index.tolist()
+    # Build matrix violation x PPE
+    sub = pd.DataFrame({"violation": vt, "ppe": ppe_norm})
+    sub = sub[sub["violation"].isin(top_v)]
+    pivot = sub.pivot_table(index="violation", columns="ppe", values="violation", aggfunc="count").fillna(0).astype(int)
+    pivot = pivot.loc[top_v]
+    labels = pivot.index.tolist()
+    series = [{"name": str(col), "data": pivot[col].tolist()} for col in pivot.columns]
+    return JSONResponse(content={"labels": labels, "series": series})
+
+
+@router.get("/data/repeated-incidents")
+async def data_repeated_incidents():
+    df = get_incident_df()
+    if df is None or df.empty:
+        return JSONResponse(content={"labels": [], "series": []})
+    rep_col = _resolve_column(df, ["repeated incident", "repeated event"]) or None
+    loc_col = _resolve_column(df, ["specific location of occurrence", "sub-location", "location"]) or None
+    if rep_col is None or loc_col is None:
+        return JSONResponse(content={"labels": [], "series": []})
+    mask = df[rep_col].astype(str).str.lower().isin(["yes", "true", "1"])
+    vc = df.loc[mask, loc_col].astype(str).value_counts().head(15)
+    return JSONResponse(content={
+        "labels": vc.index.tolist(),
+        "series": [{"name": "Repeated Count", "data": vc.values.astype(int).tolist()}],
+    })
+
 @router.get("/hse-scorecard/insights", response_model=ChartInsightsResponse)
 async def hse_scorecard_insights():
+    title = "Unified HSE Scorecard"
     inc = get_incident_df()
     haz = get_hazard_df()
     aud = get_audit_df()
     ins = get_inspection_df()
-    fig = plot_service.create_unified_hse_scorecard(inc, haz, aud, ins)
-    payload = ChartInsightsRequest(figure=fig.to_plotly_json(), title="HSE Scorecard")
-    return await generate_chart_insights(payload)
+    inc_count = len(inc) if isinstance(inc, pd.DataFrame) else 0
+    haz_count = len(haz) if isinstance(haz, pd.DataFrame) else 0
+    audits_completed = 0
+    if isinstance(aud, pd.DataFrame) and 'audit_status' in aud.columns:
+        audits_completed = (aud['audit_status'].astype(str).str.lower() == 'closed').sum()
+    insp_count = len(ins) if isinstance(ins, pd.DataFrame) else 0
+    summary = {
+        'title': title,
+        'kpis': {
+            'incidents': inc_count,
+            'hazards': haz_count,
+            'audits_completed': int(audits_completed),
+            'inspections': insp_count,
+        }
+    }
+    try:
+        prompt = (
+            "Provide concise markdown insights for the HSE scorecard KPIs (incidents, hazards, audits completed, inspections). "
+            "Highlight notable imbalances, trends to watch, and 3-4 short recommendations."
+        )
+        md = ask_openai(prompt, context=json.dumps(summary, ensure_ascii=False), model="gpt-4o", code_mode=False, multi_df=False)
+        if md and not md.lower().startswith("openai") and "not installed" not in md.lower():
+            return ChartInsightsResponse(insights_md=md)
+    except Exception:
+        pass
+    parts = [f"## {title}"]
+    parts.append(f"- **Incidents**: {inc_count}")
+    parts.append(f"- **Hazards**: {haz_count}")
+    parts.append(f"- **Audits completed**: {audits_completed}")
+    parts.append(f"- **Inspections**: {insp_count}")
+    parts.append("\n### Recommendations")
+    parts.append("- **Action**: Set monthly targets for incident/hazard reduction.")
+    parts.append("- **Action**: Ensure timely closure of audits and follow-ups.")
+    parts.append("- **Action**: Maintain inspection cadence in high-risk areas.")
+    return ChartInsightsResponse(insights_md="\n".join(parts))
 
 
 @router.get("/hse-performance-index", response_model=PlotlyFigureResponse)
@@ -54,10 +358,82 @@ async def hse_performance_index(dataset: str = Query("incident", description="Da
 
 @router.get("/hse-performance-index/insights", response_model=ChartInsightsResponse)
 async def hse_performance_index_insights(dataset: str = Query("incident", description="Dataset to use: incident or hazard")):
+    # Data-driven HSE index computation from dataset
     df = get_incident_df() if (dataset or "incident").lower() == "incident" else get_hazard_df()
-    fig = plot_service.create_hse_performance_index(df)
-    payload = ChartInsightsRequest(figure=fig.to_plotly_json(), title="HSE Performance Index")
-    return await generate_chart_insights(payload)
+    title = "HSE Performance Index"
+    if df is None or df.empty or 'department' not in df.columns:
+        return ChartInsightsResponse(insights_md=f"## {title}\n\n- **Summary**: Not enough data to analyze.")
+    cp = df.copy()
+    # Coerce relevant columns
+    for c in ['severity_score', 'risk_score', 'reporting_delay_days', 'resolution_time_days', 'root_cause_is_missing', 'corrective_actions_is_missing']:
+        if c not in cp.columns:
+            cp[c] = np.nan
+    def _to_days(series: pd.Series) -> pd.Series:
+        try:
+            if series is None:
+                return series
+            s = series
+            if np.issubdtype(s.dtype, np.timedelta64):
+                return s.dt.total_seconds() / 86400.0
+            if np.issubdtype(s.dtype, np.datetime64):
+                return pd.to_numeric(s, errors='coerce')
+            return pd.to_numeric(s, errors='coerce')
+        except Exception:
+            return pd.to_numeric(series, errors='coerce')
+    cp['reporting_delay_days'] = _to_days(cp['reporting_delay_days'])
+    cp['resolution_time_days'] = _to_days(cp['resolution_time_days'])
+    for c in ['severity_score', 'risk_score']:
+        cp[c] = pd.to_numeric(cp[c], errors='coerce')
+    for c in ['root_cause_is_missing', 'corrective_actions_is_missing']:
+        cp[c] = pd.to_numeric(cp[c].astype(float), errors='coerce')
+    dept_metrics = cp.groupby('department').agg({
+        'severity_score': 'mean',
+        'risk_score': 'mean',
+        'reporting_delay_days': 'mean',
+        'resolution_time_days': 'mean',
+        'root_cause_is_missing': 'mean',
+        'corrective_actions_is_missing': 'mean'
+    }).fillna(0)
+    sev = dept_metrics['severity_score'].clip(lower=0, upper=5)
+    risk = dept_metrics['risk_score'].clip(lower=0, upper=5)
+    rep = dept_metrics['reporting_delay_days'].clip(lower=0, upper=30)
+    res = dept_metrics['resolution_time_days'].clip(lower=0, upper=60)
+    rc_miss = dept_metrics['root_cause_is_missing'].clip(lower=0, upper=1)
+    ca_miss = dept_metrics['corrective_actions_is_missing'].clip(lower=0, upper=1)
+    idx = ((5 - sev)/5 * 0.25 + (5 - risk)/5 * 0.25 + (30 - rep)/30 * 0.2 + (60 - res)/60 * 0.2 + (1 - rc_miss) * 0.05 + (1 - ca_miss) * 0.05) * 100
+    scores = idx.sort_values(ascending=False)
+    summary = {
+        'title': title,
+        'scores': [{ 'department': str(k), 'index': float(v) } for k, v in scores.items()],
+        'top5': [{ 'department': str(k), 'index': float(v)} for k, v in scores.head(5).items()],
+        'bottom5': [{ 'department': str(k), 'index': float(v)} for k, v in scores.tail(5).items()],
+        'components': {
+            'severity_score_mean': { str(k): float(v) for k, v in sev.items() },
+            'risk_score_mean': { str(k): float(v) for k, v in risk.items() },
+            'reporting_delay_days_mean': { str(k): float(v) for k, v in rep.items() },
+            'resolution_time_days_mean': { str(k): float(v) for k, v in res.items() },
+        }
+    }
+    try:
+        prompt = (
+            "Using the HSE index per department (0-100), write concise markdown insights: top/bottom performers, "
+            "what drives high/low scores (severity, risk, delays), and 3-4 recommendations."
+        )
+        llm_md = ask_openai(prompt, context=json.dumps(summary, ensure_ascii=False), model="gpt-4o", code_mode=False, multi_df=False)
+        if llm_md and not llm_md.lower().startswith("openai") and "not installed" not in llm_md.lower():
+            return ChartInsightsResponse(insights_md=llm_md)
+    except Exception:
+        pass
+    # Fallback
+    parts = [f"## {title}"]
+    if len(scores) > 0:
+        parts.append(f"- **Top**: {scores.index[0]} ({scores.iloc[0]:.1f})")
+        parts.append(f"- **Bottom**: {scores.index[-1]} ({scores.iloc[-1]:.1f})")
+    parts.append("\n### Recommendations")
+    parts.append("- **Action**: Target low-scoring departments with focused interventions on severity/risk reduction.")
+    parts.append("- **Action**: Reduce reporting and resolution delays where averages are highest.")
+    parts.append("- **Action**: Share practices from top performers to lift underperformers.")
+    return ChartInsightsResponse(insights_md="\n".join(parts))
 
 
 @router.get("/risk-calendar-heatmap", response_model=PlotlyFigureResponse)
@@ -69,10 +445,127 @@ async def risk_calendar_heatmap(dataset: str = Query("incident", description="Da
 
 @router.get("/risk-calendar-heatmap/insights", response_model=ChartInsightsResponse)
 async def risk_calendar_heatmap_insights(dataset: str = Query("incident", description="Dataset to use: incident or hazard")):
+    # Data-driven insights from the underlying dataset (no chart conversion)
     df = get_incident_df() if (dataset or "incident").lower() == "incident" else get_hazard_df()
-    fig = plot_service.create_risk_calendar_heatmap(df)
-    payload = ChartInsightsRequest(figure=fig.to_plotly_json(), title="Risk Calendar Heatmap")
-    return await generate_chart_insights(payload)
+    title = "Department Risk Score Evolution"
+    if df is None or df.empty or not {"occurrence_date", "department", "risk_score"}.issubset(df.columns):
+        return ChartInsightsResponse(insights_md=f"## {title}\n\n- **Summary**: Not enough data to analyze.")
+
+    cp = df.copy()
+    cp["risk_score"] = pd.to_numeric(cp["risk_score"], errors="coerce")
+    cp["_m"] = pd.to_datetime(cp["occurrence_date"], errors="coerce").dt.to_period("M")
+    risk_pivot = cp.pivot_table(values="risk_score", index="department", columns="_m", aggfunc="mean")
+    z = risk_pivot.to_numpy()
+    metric = "avg_risk_score"
+    # Fallback to counts if risk matrix has no finite numbers
+    if not (isinstance(z, np.ndarray) and np.isfinite(z).any()):
+        count_pivot = cp.pivot_table(values="risk_score", index="department", columns="_m", aggfunc="count")
+        risk_pivot = count_pivot
+        z = risk_pivot.to_numpy()
+        metric = "count_fallback"
+
+    x_labels = [str(c) for c in risk_pivot.columns]
+    y_labels = [str(i) for i in risk_pivot.index]
+
+    # Compute insights metrics
+    z_array = np.array(z, dtype=float)
+    row_means = np.nanmean(z_array, axis=1) if z_array.size else np.array([])
+    col_means = np.nanmean(z_array, axis=0) if z_array.size else np.array([])
+    dept_avg = [
+        {"department": y_labels[i], "avg": float(row_means[i]) if row_means.size else 0.0}
+        for i in range(len(y_labels))
+    ]
+    dept_avg_sorted = sorted([d for d in dept_avg if np.isfinite(d["avg"])], key=lambda d: d["avg"], reverse=True)
+    month_avg = [
+        {"month": x_labels[j], "avg": float(col_means[j]) if col_means.size else 0.0}
+        for j in range(len(x_labels))
+    ]
+
+    top_increases, top_decreases, most_stable = [], [], []
+    if z_array.shape[1] >= 2:
+        changes = []
+        stability = []
+        for i in range(z_array.shape[0]):
+            series = z_array[i, :]
+            idx = np.where(np.isfinite(series))[0]
+            if idx.size == 0:
+                continue
+            first_idx, last_idx = int(idx[0]), int(idx[-1])
+            start_val = float(series[first_idx])
+            end_val = float(series[last_idx])
+            changes.append({
+                "department": y_labels[i],
+                "start": start_val,
+                "end": end_val,
+                "change": end_val - start_val,
+                "start_label": x_labels[first_idx] if first_idx < len(x_labels) else str(first_idx),
+                "end_label": x_labels[last_idx] if last_idx < len(x_labels) else str(last_idx),
+            })
+            stability.append({"department": y_labels[i], "std": float(np.nanstd(series))})
+        top_increases = sorted(changes, key=lambda d: d["change"], reverse=True)[:3]
+        top_decreases = sorted(changes, key=lambda d: d["change"])[:3]
+        most_stable = sorted(stability, key=lambda d: d["std"])[:3]
+
+    # Hotspot
+    hotspot = None
+    if z_array.ndim == 2 and np.isfinite(z_array).any():
+        r, c = np.unravel_index(np.nanargmax(z_array), z_array.shape)
+        hotspot = {"row": r, "col": c, "value": float(z_array[r, c]), "y_label": y_labels[r], "x_label": x_labels[c]}
+
+    summary = {
+        "title": title,
+        "metric": metric,
+        "x_labels": x_labels,
+        "y_labels": y_labels,
+        "department_averages": dept_avg_sorted,
+        "month_averages": month_avg,
+        "top_increases": top_increases,
+        "top_decreases": top_decreases,
+        "most_stable": most_stable,
+        "hotspot": hotspot,
+    }
+
+    # Try AI summarized insights with JSON context
+    try:
+        prompt = (
+            "Analyze the provided JSON metrics from a department-by-month matrix and write an executive markdown insight. "
+            "Include: highest/lowest average departments, departments with largest increase/decrease (with start/end months), "
+            "most stable departments (low std), notable hotspot (dept at month), and 3-4 actionable recommendations."
+        )
+        llm_md = ask_openai(
+            prompt,
+            context=json.dumps(summary, ensure_ascii=False),
+            model="gpt-4o",
+            code_mode=False,
+            multi_df=False,
+        )
+        if llm_md and not llm_md.lower().startswith("openai") and "not installed" not in llm_md.lower():
+            return ChartInsightsResponse(insights_md=llm_md)
+    except Exception:
+        pass
+
+    # Deterministic fallback markdown
+    parts = [f"## {title}"]
+    if dept_avg_sorted:
+        parts.append(f"- **Highest average**: {dept_avg_sorted[0]['department']} ({dept_avg_sorted[0]['avg']:.2f})")
+        parts.append(f"- **Lowest average**: {dept_avg_sorted[-1]['department']} ({dept_avg_sorted[-1]['avg']:.2f})")
+    if top_increases:
+        a = top_increases[0]
+        parts.append(f"- **Largest increase**: {a['department']} from {a['start']:.2f} to {a['end']:.2f} ({a['start_label']} → {a['end_label']})")
+    if top_decreases:
+        d0 = top_decreases[0]
+        parts.append(f"- **Largest decrease**: {d0['department']} from {d0['start']:.2f} to {d0['end']:.2f} ({d0['start_label']} → {d0['end_label']})")
+    if most_stable:
+        s0 = most_stable[0]
+        parts.append(f"- **Most stable**: {s0['department']} (std {s0['std']:.2f})")
+    if hotspot:
+        parts.append(f"- **Hotspot**: {hotspot['y_label']} at {hotspot['x_label']} ({hotspot['value']:.2f})")
+    parts.append("\n### Recommendations")
+    parts.append("- **Action**: Investigate the top rising department for root causes and mitigation.")
+    parts.append("- **Action**: Share best practices from the most stable department.")
+    parts.append("- **Action**: Set monthly targets for high-risk departments and track progress.")
+    parts.append("- **Action**: Review reporting/resolution workflows if volatility is high.")
+    return ChartInsightsResponse(insights_md="\n".join(parts))
 
 
 @router.get("/psm-breakdown", response_model=PlotlyFigureResponse)
@@ -84,10 +577,39 @@ async def psm_breakdown(dataset: str = Query("incident", description="Dataset to
 
 @router.get("/psm-breakdown/insights", response_model=ChartInsightsResponse)
 async def psm_breakdown_insights(dataset: str = Query("incident", description="Dataset to use: incident or hazard")):
+    # Data-driven PSM breakdown
     df = get_incident_df() if (dataset or "incident").lower() == "incident" else get_hazard_df()
-    fig = plot_service.create_psm_breakdown(df)
-    payload = ChartInsightsRequest(figure=fig.to_plotly_json(), title="PSM Breakdown")
-    return await generate_chart_insights(payload)
+    title = "Process Safety Management Analysis"
+    if df is None or df.empty:
+        return ChartInsightsResponse(insights_md=f"## {title}\n\n- **Summary**: Not enough data to analyze.")
+    psm_counts = df['psm'].value_counts(dropna=True) if 'psm' in df.columns else pd.Series(dtype=int)
+    pse_counts = df['pse_category'].value_counts(dropna=True) if 'pse_category' in df.columns else pd.Series(dtype=int)
+    summary = {
+        'title': title,
+        'psm_top': [{ 'label': str(k), 'count': int(v)} for k, v in psm_counts.head(10).items()],
+        'pse_top': [{ 'label': str(k), 'count': int(v)} for k, v in pse_counts.head(10).items()],
+        'total': int(len(df)),
+    }
+    try:
+        prompt = (
+            "Summarize PSM and PSE distributions: top elements/categories and where to focus. Provide concise markdown with recommendations."
+        )
+        md = ask_openai(prompt, context=json.dumps(summary, ensure_ascii=False), model="gpt-4o", code_mode=False, multi_df=False)
+        if md and not md.lower().startswith("openai") and "not installed" not in md.lower():
+            return ChartInsightsResponse(insights_md=md)
+    except Exception:
+        pass
+    parts = [f"## {title}"]
+    if not psm_counts.empty:
+        k, v = next(iter(psm_counts.items()))
+        parts.append(f"- **Top PSM element**: {k} ({v})")
+    if not pse_counts.empty:
+        k, v = next(iter(pse_counts.items()))
+        parts.append(f"- **Top PSE category**: {k} ({v})")
+    parts.append("\n### Recommendations")
+    parts.append("- **Action**: Prioritize top categories for deeper root-cause analysis.")
+    parts.append("- **Action**: Track monthly shifts in leading categories.")
+    return ChartInsightsResponse(insights_md="\n".join(parts))
 
 
 @router.get("/consequence-matrix", response_model=PlotlyFigureResponse)
@@ -99,10 +621,59 @@ async def consequence_matrix(dataset: str = Query("incident", description="Datas
 
 @router.get("/consequence-matrix/insights", response_model=ChartInsightsResponse)
 async def consequence_matrix_insights(dataset: str = Query("incident", description="Dataset to use: incident or hazard")):
+    # Data-driven crosstab analysis
     df = get_incident_df() if (dataset or "incident").lower() == "incident" else get_hazard_df()
-    fig = plot_service.create_consequence_matrix(df)
-    payload = ChartInsightsRequest(figure=fig.to_plotly_json(), title="Consequence Matrix")
-    return await generate_chart_insights(payload)
+    title = "Actual vs Worst Case Consequence"
+    a_col = 'actual_consequence_incident'
+    w_col = 'worst_case_consequence_incident'
+    if df is None or df.empty or a_col not in df.columns or w_col not in df.columns:
+        return ChartInsightsResponse(insights_md=f"## {title}\n\n- **Summary**: Not enough data to analyze.")
+    ct = pd.crosstab(df[a_col], df[w_col])
+    z = ct.to_numpy(dtype=float)
+    rows = [str(i) for i in ct.index]
+    cols = [str(c) for c in ct.columns]
+    total = float(z.sum()) if z.size else 0.0
+    diag = float(np.trace(z)) if z.ndim == 2 else 0.0
+    off_diag = float(total - diag)
+    hotspot = None
+    if z.ndim == 2 and z.size and np.isfinite(z).any():
+        r, c = np.unravel_index(np.nanargmax(z), z.shape)
+        hotspot = { 'row': rows[r], 'col': cols[c], 'value': float(z[r, c]) }
+    row_totals = { rows[i]: float(np.nansum(z[i, :])) for i in range(z.shape[0]) } if z.ndim == 2 else {}
+    col_totals = { cols[j]: float(np.nansum(z[:, j])) for j in range(z.shape[1]) } if z.ndim == 2 else {}
+    summary = {
+        'title': title,
+        'rows': rows,
+        'cols': cols,
+        'total': total,
+        'diagonal_match': diag,
+        'off_diagonal': off_diag,
+        'row_totals': row_totals,
+        'col_totals': col_totals,
+        'hotspot': hotspot,
+    }
+    try:
+        prompt = (
+            "Analyze the consequence crosstab JSON: highlight where actual equals worst-case (diagonal) versus mismatches, "
+            "largest cells, and recommendations to reduce worst-case gaps. Provide concise markdown."
+        )
+        llm_md = ask_openai(prompt, context=json.dumps(summary, ensure_ascii=False), model="gpt-4o", code_mode=False, multi_df=False)
+        if llm_md and not llm_md.lower().startswith("openai") and "not installed" not in llm_md.lower():
+            return ChartInsightsResponse(insights_md=llm_md)
+    except Exception:
+        pass
+    parts = [f"## {title}"]
+    if total:
+        parts.append(f"- **Total cases**: {total:.0f}")
+        parts.append(f"- **Matches (diagonal)**: {diag:.0f}")
+        parts.append(f"- **Mismatches**: {off_diag:.0f}")
+    if hotspot:
+        parts.append(f"- **Largest cell**: {hotspot['row']} vs {hotspot['col']} ({hotspot['value']:.0f})")
+    parts.append("\n### Recommendations")
+    parts.append("- **Action**: Review scenarios with high worst-case vs actual mismatches.")
+    parts.append("- **Action**: Strengthen controls for categories driving the hotspot.")
+    parts.append("- **Action**: Align risk assessment to improve accuracy (increase diagonal matches).")
+    return ChartInsightsResponse(insights_md="\n".join(parts))
 
 
 @router.get("/data-quality-metrics", response_model=PlotlyFigureResponse)
@@ -114,10 +685,51 @@ async def data_quality_metrics(dataset: str = Query("incident", description="Dat
 
 @router.get("/data-quality-metrics/insights", response_model=ChartInsightsResponse)
 async def data_quality_metrics_insights(dataset: str = Query("incident", description="Dataset to use: incident or hazard")):
+    title = "Data Quality Metrics"
     df = get_incident_df() if (dataset or "incident").lower() == "incident" else get_hazard_df()
-    fig = plot_service.create_data_quality_metrics(df)
-    payload = ChartInsightsRequest(figure=fig.to_plotly_json(), title="Data Quality Metrics")
-    return await generate_chart_insights(payload)
+    if df is None or df.empty:
+        return ChartInsightsResponse(insights_md=f"## {title}\n\n- **Summary**: Not enough data to analyze.")
+    cp = df.copy()
+    rc_col = 'root_cause_is_missing'
+    ca_col = 'corrective_actions_is_missing'
+    rep_col = 'reporting_delay_days'
+    res_col = 'resolution_time_days'
+    for c in [rc_col, ca_col]:
+        if c in cp.columns:
+            cp[c] = pd.to_numeric(cp[c].astype(float), errors='coerce')
+    rep = pd.to_numeric(cp.get(rep_col, pd.Series(dtype=float)), errors='coerce') if rep_col in cp.columns else pd.Series(dtype=float)
+    res = pd.to_numeric(cp.get(res_col, pd.Series(dtype=float)), errors='coerce') if res_col in cp.columns else pd.Series(dtype=float)
+    status = cp['status'].astype(str) if 'status' in cp.columns else pd.Series(dtype=str)
+    summary = {
+        'title': title,
+        'missing_root_cause_rate': float(cp[rc_col].mean()) if rc_col in cp.columns and len(cp) else None,
+        'missing_actions_rate': float(cp[ca_col].mean()) if ca_col in cp.columns and len(cp) else None,
+        'reporting_delay_mean': float(rep.mean()) if rep.notna().any() else None,
+        'reporting_delay_p95': float(rep.quantile(0.95)) if rep.notna().any() else None,
+        'resolution_time_mean': float(res.mean()) if res.notna().any() else None,
+        'resolution_time_p95': float(res.quantile(0.95)) if res.notna().any() else None,
+        'resolution_by_status': status.value_counts().head(10).to_dict() if not status.empty else {},
+    }
+    try:
+        prompt = "Provide concise markdown on data quality: missing fields, delays, resolution by status, and actions to improve data capture."
+        md = ask_openai(prompt, context=json.dumps(summary, ensure_ascii=False), model="gpt-4o", code_mode=False, multi_df=False)
+        if md and not md.lower().startswith("openai") and "not installed" not in md.lower():
+            return ChartInsightsResponse(insights_md=md)
+    except Exception:
+        pass
+    parts = [f"## {title}"]
+    if summary['missing_root_cause_rate'] is not None:
+        parts.append(f"- **Root cause missing**: {summary['missing_root_cause_rate']*100:.0f}%")
+    if summary['missing_actions_rate'] is not None:
+        parts.append(f"- **Actions missing**: {summary['missing_actions_rate']*100:.0f}%")
+    if summary['reporting_delay_mean'] is not None:
+        parts.append(f"- **Reporting delay (mean/p95)**: {summary['reporting_delay_mean']:.1f} / {summary['reporting_delay_p95']:.1f} days")
+    if summary['resolution_time_mean'] is not None:
+        parts.append(f"- **Resolution time (mean/p95)**: {summary['resolution_time_mean']:.1f} / {summary['resolution_time_p95']:.1f} days")
+    parts.append("\n### Recommendations")
+    parts.append("- **Action**: Improve mandatory capture of root cause and actions.")
+    parts.append("- **Action**: Triage records exceeding 95th percentile delays.")
+    return ChartInsightsResponse(insights_md="\n".join(parts))
 
 
 @router.get("/comprehensive-timeline", response_model=PlotlyFigureResponse)
@@ -129,10 +741,53 @@ async def comprehensive_timeline(dataset: str = Query("incident", description="D
 
 @router.get("/comprehensive-timeline/insights", response_model=ChartInsightsResponse)
 async def comprehensive_timeline_insights(dataset: str = Query("incident", description="Dataset to use: incident or hazard")):
+    title = "Comprehensive HSE Timeline"
     df = get_incident_df() if (dataset or "incident").lower() == "incident" else get_hazard_df()
-    fig = plot_service.create_comprehensive_timeline(df)
-    payload = ChartInsightsRequest(figure=fig.to_plotly_json(), title="Comprehensive Timeline")
-    return await generate_chart_insights(payload)
+    if df is None or 'occurrence_date' not in df.columns:
+        return ChartInsightsResponse(insights_md=f"## {title}\n\n- **Summary**: Not enough data to analyze.")
+    cp = df.copy()
+    cp['_m'] = pd.to_datetime(cp['occurrence_date'], errors='coerce').dt.to_period('M')
+    agg_dict = {}
+    count_col = 'incident_id' if 'incident_id' in cp.columns else cp.columns[0]
+    agg_dict[count_col] = 'count'
+    for c in ['severity_score','risk_score']:
+        if c in cp.columns:
+            agg_dict[c] = 'mean'
+    for c in ['estimated_cost_impact','estimated_manhours_impact']:
+        if c in cp.columns:
+            agg_dict[c] = 'sum'
+    timeline = cp.groupby('_m').agg(agg_dict)
+    counts = timeline[count_col] if count_col in timeline.columns else pd.Series(dtype=float)
+    trend = None
+    if len(counts) >= 3:
+        last3 = counts.tail(3).values
+        if len(set(last3)) > 1:
+            pct = (last3[-1] - last3[0]) / max(1, last3[0]) * 100.0
+            trend = ("up", float(abs(pct))) if pct > 0 else ("down", float(abs(pct)))
+    summary = {
+        'title': title,
+        'months': [str(ix) for ix in timeline.index],
+        'counts': [int(v) for v in (counts.fillna(0).values if not counts.empty else [])],
+        'severity_mean': [float(v) for v in timeline.get('severity_score', pd.Series(dtype=float)).fillna(0).values],
+        'risk_mean': [float(v) for v in timeline.get('risk_score', pd.Series(dtype=float)).fillna(0).values],
+        'cost_sum': [float(v) for v in timeline.get('estimated_cost_impact', pd.Series(dtype=float)).fillna(0).values],
+        'manhours_sum': [float(v) for v in timeline.get('estimated_manhours_impact', pd.Series(dtype=float)).fillna(0).values],
+        'trend_last3': {'direction': trend[0], 'percent': trend[1]} if trend else None,
+    }
+    try:
+        prompt = "Summarize the monthly timeline: counts trend, severity/risk movement, and cost/manhours highlights with recommendations."
+        md = ask_openai(prompt, context=json.dumps(summary, ensure_ascii=False), model="gpt-4o", code_mode=False, multi_df=False)
+        if md and not md.lower().startswith("openai") and "not installed" not in md.lower():
+            return ChartInsightsResponse(insights_md=md)
+    except Exception:
+        pass
+    parts = [f"## {title}"]
+    if trend:
+        parts.append(f"- **Monthly count trend**: {trend[0]} {trend[1]:.1f}% (last 3 months)")
+    parts.append("\n### Recommendations")
+    parts.append("- **Action**: Investigate any sudden month-over-month spikes.")
+    parts.append("- **Action**: Track severity/risk means and set thresholds.")
+    return ChartInsightsResponse(insights_md="\n".join(parts))
 
 
 @router.get("/audit-inspection-tracker", response_model=PlotlyFigureResponse)
@@ -145,11 +800,40 @@ async def audit_inspection_tracker():
 
 @router.get("/audit-inspection-tracker/insights", response_model=ChartInsightsResponse)
 async def audit_inspection_traker_insights():
+    title = "Audit & Inspection Compliance Tracking"
     audit_df = get_audit_df()
     inspection_df = get_inspection_df()
-    fig = plot_service.create_audit_inspection_tracker(audit_df, inspection_df)
-    payload = ChartInsightsRequest(figure=fig.to_plotly_json(), title="Audit & Inspection Tracker")
-    return await generate_chart_insights(payload)
+    def _timeline(df: pd.DataFrame):
+        if df is None or not {'start_date','audit_status'}.issubset(df.columns):
+            return None
+        d = df.copy()
+        d['_m'] = pd.to_datetime(d['start_date'], errors='coerce').dt.to_period('M')
+        totals = d.groupby('_m').size()
+        by_status = d.groupby([d['_m'], 'audit_status']).size().unstack(fill_value=0)
+        return {
+            'months': [str(ix) for ix in totals.index],
+            'totals': [int(v) for v in totals.values],
+            'by_status': { str(k): [int(x) for x in by_status[k].values] for k in by_status.columns }
+        }
+    aud = _timeline(audit_df)
+    ins = _timeline(inspection_df)
+    summary = { 'title': title, 'audit': aud, 'inspection': ins }
+    try:
+        prompt = "Summarize audits and inspections over time: totals trend, dominant statuses, and actions to improve throughput."
+        md = ask_openai(prompt, context=json.dumps(summary, ensure_ascii=False), model="gpt-4o", code_mode=False, multi_df=False)
+        if md and not md.lower().startswith("openai") and "not installed" not in md.lower():
+            return ChartInsightsResponse(insights_md=md)
+    except Exception:
+        pass
+    parts = [f"## {title}"]
+    if aud and aud['totals']:
+        parts.append(f"- **Audits — last month total**: {aud['totals'][-1]}")
+    if ins and ins['totals']:
+        parts.append(f"- **Inspections — last month total**: {ins['totals'][-1]}")
+    parts.append("\n### Recommendations")
+    parts.append("- **Action**: Address bottleneck statuses with SLAs.")
+    parts.append("- **Action**: Balance workload across months to avoid spikes.")
+    return ChartInsightsResponse(insights_md="\n".join(parts))
 
 
 @router.get("/location-risk-treemap", response_model=PlotlyFigureResponse)
@@ -161,10 +845,45 @@ async def location_risk_treemap(dataset: str = Query("incident", description="Da
 
 @router.get("/location-risk-treemap/insights", response_model=ChartInsightsResponse)
 async def location_risk_treemap_insights(dataset: str = Query("incident", description="Dataset to use: incident or hazard")):
+    title = "Location Risk Map"
     df = get_incident_df() if (dataset or "incident").lower() == "incident" else get_hazard_df()
-    fig = plot_service.create_location_risk_treemap(df)
-    payload = ChartInsightsRequest(figure=fig.to_plotly_json(), title="Location Risk Treemap")
-    return await generate_chart_insights(payload)
+    if df is None or not {'location','sublocation'}.issubset(df.columns):
+        return ChartInsightsResponse(insights_md=f"## {title}\n\n- **Summary**: Not enough data to analyze.")
+    cp = df.copy()
+    for c in ['severity_score','risk_score','estimated_cost_impact']:
+        if c in cp.columns:
+            cp[c] = pd.to_numeric(cp[c], errors='coerce')
+    g = cp.groupby(['location','sublocation']).agg(
+        count=('sublocation','count'),
+        avg_severity=('severity_score','mean'),
+        avg_risk=('risk_score','mean'),
+        total_cost=('estimated_cost_impact','sum')
+    ).fillna(0).reset_index()
+    top_count = g.sort_values('count', ascending=False).head(5)
+    top_risk = g.sort_values('avg_risk', ascending=False).head(5)
+    summary = {
+        'title': title,
+        'top_hotspots_by_count': g.sort_values('count', ascending=False).head(10).to_dict(orient='records'),
+        'top_hotspots_by_risk': g.sort_values('avg_risk', ascending=False).head(10).to_dict(orient='records'),
+    }
+    try:
+        prompt = "Summarize location hotspots by count and by risk; include 3-4 actions to mitigate hotspots."
+        md = ask_openai(prompt, context=json.dumps(summary, ensure_ascii=False), model="gpt-4o", code_mode=False, multi_df=False)
+        if md and not md.lower().startswith("openai") and "not installed" not in md.lower():
+            return ChartInsightsResponse(insights_md=md)
+    except Exception:
+        pass
+    parts = [f"## {title}"]
+    if not top_count.empty:
+        r0 = top_count.iloc[0]
+        parts.append(f"- **Most incidents**: {r0['location']} / {r0['sublocation']} ({int(r0['count'])})")
+    if not top_risk.empty:
+        r1 = top_risk.iloc[0]
+        parts.append(f"- **Highest risk**: {r1['location']} / {r1['sublocation']} (avg {r1['avg_risk']:.2f})")
+    parts.append("\n### Recommendations")
+    parts.append("- **Action**: Audit top hotspots for immediate controls.")
+    parts.append("- **Action**: Increase monitoring in high-risk sublocations.")
+    return ChartInsightsResponse(insights_md="\n".join(parts))
 
 
 @router.get("/department-spider", response_model=PlotlyFigureResponse)
@@ -176,10 +895,82 @@ async def department_spider(dataset: str = Query("incident", description="Datase
 
 @router.get("/department-spider/insights", response_model=ChartInsightsResponse)
 async def department_spider_insights(dataset: str = Query("incident", description="Dataset to use: incident or hazard")):
+    # Data-driven normalized department metrics (0-100)
     df = get_incident_df() if (dataset or "incident").lower() == "incident" else get_hazard_df()
-    fig = plot_service.create_department_spider(df)
-    payload = ChartInsightsRequest(figure=fig.to_plotly_json(), title="Department Spider")
-    return await generate_chart_insights(payload)
+    title = "Department HSE Performance Radar"
+    if df is None or 'department' not in df.columns:
+        return ChartInsightsResponse(insights_md=f"## {title}\n\n- **Summary**: Not enough data to analyze.")
+    cp = df.copy()
+    for col in ['severity_score', 'risk_score', 'reporting_delay_days', 'resolution_time_days', 'root_cause_is_missing', 'corrective_actions_is_missing']:
+        if col not in cp.columns:
+            cp[col] = np.nan
+    def _to_days(series: pd.Series) -> pd.Series:
+        try:
+            if series is None:
+                return series
+            s = series
+            if np.issubdtype(s.dtype, np.timedelta64):
+                return s.dt.total_seconds() / 86400.0
+            if np.issubdtype(s.dtype, np.datetime64):
+                return pd.to_numeric(s, errors='coerce')
+            return pd.to_numeric(s, errors='coerce')
+        except Exception:
+            return pd.to_numeric(series, errors='coerce')
+    cp['reporting_delay_days'] = _to_days(cp['reporting_delay_days'])
+    cp['resolution_time_days'] = _to_days(cp['resolution_time_days'])
+    dm = cp.groupby('department').agg({
+        'severity_score': lambda x: 5 - np.nanmean(pd.to_numeric(x, errors='coerce')),
+        'risk_score': lambda x: 5 - np.nanmean(pd.to_numeric(x, errors='coerce')),
+        'reporting_delay_days': lambda x: max(0, 30 - np.nanmean(pd.to_numeric(x, errors='coerce'))),
+        'resolution_time_days': lambda x: max(0, 60 - np.nanmean(pd.to_numeric(x, errors='coerce'))),
+        'root_cause_is_missing': lambda x: 100 * (1 - np.nanmean(pd.to_numeric(x, errors='coerce'))),
+        'corrective_actions_is_missing': lambda x: 100 * (1 - np.nanmean(pd.to_numeric(x, errors='coerce'))),
+    }).fillna(0)
+    # Normalize each column to 0-100
+    for col in dm.columns:
+        m = dm[col].max()
+        if m and m > 0:
+            dm[col] = (dm[col] / m) * 100
+    # Aggregate overall score (mean of dimensions)
+    dm['overall'] = dm.mean(axis=1)
+    ranked = dm['overall'].sort_values(ascending=False)
+    radar = { 'labels': ['Low Severity','Low Risk','Fast Reporting','Quick Resolution','Root Cause ID','Actions Taken'] }
+    radar['departments'] = [
+        { 'department': str(idx), 'scores': [
+            float(dm.loc[idx, 'severity_score']),
+            float(dm.loc[idx, 'risk_score']),
+            float(dm.loc[idx, 'reporting_delay_days']),
+            float(dm.loc[idx, 'resolution_time_days']),
+            float(dm.loc[idx, 'root_cause_is_missing']),
+            float(dm.loc[idx, 'corrective_actions_is_missing']),
+        ], 'overall': float(dm.loc[idx, 'overall']) } for idx in dm.index
+    ]
+    summary = {
+        'title': title,
+        'ranking': [{ 'department': str(k), 'overall': float(v)} for k, v in ranked.items()],
+        'radar': radar,
+        'top5': [{ 'department': str(k), 'overall': float(v)} for k, v in ranked.head(5).items()],
+        'bottom5': [{ 'department': str(k), 'overall': float(v)} for k, v in ranked.tail(5).items()],
+    }
+    try:
+        prompt = (
+            "From normalized department metrics (0-100), produce markdown insights: top/bottom departments, which dimensions "
+            "(severity, risk, reporting, resolution, root cause ID, actions) drive performance, and 3-4 actions."
+        )
+        llm_md = ask_openai(prompt, context=json.dumps(summary, ensure_ascii=False), model="gpt-4o", code_mode=False, multi_df=False)
+        if llm_md and not llm_md.lower().startswith("openai") and "not installed" not in llm_md.lower():
+            return ChartInsightsResponse(insights_md=llm_md)
+    except Exception:
+        pass
+    parts = [f"## {title}"]
+    if len(ranked) > 0:
+        parts.append(f"- **Top**: {ranked.index[0]} ({ranked.iloc[0]:.1f})")
+        parts.append(f"- **Bottom**: {ranked.index[-1]} ({ranked.iloc[-1]:.1f})")
+    parts.append("\n### Recommendations")
+    parts.append("- **Action**: Address weakest dimensions in bottom departments.")
+    parts.append("- **Action**: Replicate practices from top departments across others.")
+    parts.append("- **Action**: Set targets per dimension (severity/risk/delays) and track monthly.")
+    return ChartInsightsResponse(insights_md="\n".join(parts))
 
 
 @router.get("/violation-analysis", response_model=PlotlyFigureResponse)
@@ -191,10 +982,51 @@ async def violation_analysis(dataset: str = Query("hazard", description="Dataset
 
 @router.get("/violation-analysis/insights", response_model=ChartInsightsResponse)
 async def violation_analysis_insights(dataset: str = Query("hazard", description="Dataset to use: incident or hazard")):
+    title = "Hazard Violation Analysis"
     df = get_hazard_df() if (dataset or "hazard").lower() == "hazard" else get_incident_df()
-    fig = plot_service.create_violation_analysis(df)
-    payload = ChartInsightsRequest(figure=fig.to_plotly_json(), title="Violation Analysis")
-    return await generate_chart_insights(payload)
+    if df is None:
+        return ChartInsightsResponse(insights_md=f"## {title}\n\n- **Summary**: Not enough data to analyze.")
+    summary = {'title': title}
+    if 'violation_type_hazard_id' in df.columns:
+        vc = df['violation_type_hazard_id'].value_counts().head(10)
+        summary['violation_types_top'] = vc.to_dict()
+    if 'worst_case_consequence_potential_hazard_id' in df.columns:
+        wc = df['worst_case_consequence_potential_hazard_id'].value_counts().head(10)
+        summary['worst_case_top'] = wc.to_dict()
+    if 'reporting_delay_days' in df.columns:
+        rd = pd.to_numeric(df['reporting_delay_days'], errors='coerce')
+        summary['reporting_delay_mean'] = float(rd.mean()) if rd.notna().any() else None
+        summary['reporting_delay_p95'] = float(rd.quantile(0.95)) if rd.notna().any() else None
+    if {'department','violation_type_hazard_id'}.issubset(df.columns):
+        heat = df.pivot_table(index='department', columns='violation_type_hazard_id', values='violation_type_hazard_id', aggfunc='count').fillna(0)
+        # Top department-violation pairs
+        pairs = []
+        for i, dep in enumerate(heat.index):
+            for j, vt in enumerate(heat.columns):
+                val = float(heat.iloc[i, j])
+                if val > 0:
+                    pairs.append({'department': str(dep), 'violation_type': str(vt), 'count': int(val)})
+        summary['top_pairs'] = sorted(pairs, key=lambda x: x['count'], reverse=True)[:10]
+    try:
+        prompt = "Summarize violation distributions and highlight top department-violation pairs with actions."
+        md = ask_openai(prompt, context=json.dumps(summary, ensure_ascii=False), model="gpt-4o", code_mode=False, multi_df=False)
+        if md and not md.lower().startswith("openai") and "not installed" not in md.lower():
+            return ChartInsightsResponse(insights_md=md)
+    except Exception:
+        pass
+    parts = [f"## {title}"]
+    if 'violation_types_top' in summary and summary['violation_types_top']:
+        top_k, top_v = next(iter(summary['violation_types_top'].items()))
+        parts.append(f"- **Most common violation**: {top_k} ({top_v})")
+    if 'worst_case_top' in summary and summary['worst_case_top']:
+        wk, wv = next(iter(summary['worst_case_top'].items()))
+        parts.append(f"- **Top worst-case category**: {wk} ({wv})")
+    if summary.get('reporting_delay_mean') is not None:
+        parts.append(f"- **Reporting delay (mean/p95)**: {summary['reporting_delay_mean']:.1f} / {summary['reporting_delay_p95']:.1f} days")
+    parts.append("\n### Recommendations")
+    parts.append("- **Action**: Target most common violations with training and controls.")
+    parts.append("- **Action**: Engage departments with highest violation pairs.")
+    return ChartInsightsResponse(insights_md="\n".join(parts))
 
 
 @router.get("/cost-prediction-analysis", response_model=PlotlyFigureResponse)
@@ -206,10 +1038,42 @@ async def cost_prediction_analysis(dataset: str = Query("incident", description=
 
 @router.get("/cost-prediction-analysis/insights", response_model=ChartInsightsResponse)
 async def cost_prediction_analysis_insights(dataset: str = Query("incident", description="Dataset to use: incident or hazard")):
+    title = "Cost Impact Analysis"
     df = get_incident_df() if (dataset or "incident").lower() == "incident" else get_hazard_df()
-    fig = plot_service.create_cost_prediction_analysis(df)
-    payload = ChartInsightsRequest(figure=fig.to_plotly_json(), title="Cost Prediction Analysis")
-    return await generate_chart_insights(payload)
+    if df is None or 'estimated_cost_impact' not in df.columns:
+        return ChartInsightsResponse(insights_md=f"## {title}\n\n- **Summary**: Not enough data to analyze.")
+    sub_cols = [c for c in ['severity_score','risk_score','reporting_delay_days','resolution_time_days','estimated_manhours_impact'] if c in df.columns]
+    sub = df[sub_cols + ['estimated_cost_impact']].copy() if sub_cols else pd.DataFrame()
+    for c in sub.columns:
+        sub[c] = pd.to_numeric(sub[c], errors='coerce')
+    corrs = {}
+    if not sub.empty and len(sub_cols) > 0:
+        cor = sub.corr(numeric_only=True)['estimated_cost_impact'].drop('estimated_cost_impact', errors='ignore')
+        corrs = { str(k): float(v) for k, v in cor.items() } if cor is not None else {}
+    summary = {
+        'title': title,
+        'top_correlations': sorted(corrs.items(), key=lambda x: abs(x[1]), reverse=True),
+        'cost_stats': {
+            'mean': float(pd.to_numeric(df['estimated_cost_impact'], errors='coerce').mean()),
+            'p95': float(pd.to_numeric(df['estimated_cost_impact'], errors='coerce').quantile(0.95)),
+        }
+    }
+    try:
+        prompt = "Summarize key drivers of cost (correlations) and provide actions to reduce cost outliers."
+        md = ask_openai(prompt, context=json.dumps(summary, ensure_ascii=False), model="gpt-4o", code_mode=False, multi_df=False)
+        if md and not md.lower().startswith("openai") and "not installed" not in md.lower():
+            return ChartInsightsResponse(insights_md=md)
+    except Exception:
+        pass
+    parts = [f"## {title}"]
+    if summary['top_correlations']:
+        k, v = summary['top_correlations'][0]
+        parts.append(f"- **Strongest correlation with cost**: {k} ({v:+.2f})")
+    parts.append(f"- **Cost (mean/p95)**: {summary['cost_stats']['mean']:.0f} / {summary['cost_stats']['p95']:.0f}")
+    parts.append("\n### Recommendations")
+    parts.append("- **Action**: Address drivers with strongest positive correlation.")
+    parts.append("- **Action**: Review processes for top 5% most expensive incidents.")
+    return ChartInsightsResponse(insights_md="\n".join(parts))
 
 
 @router.get("/facility-layout-heatmap", response_model=PlotlyFigureResponse)
@@ -222,11 +1086,53 @@ async def facility_layout_heatmap():
 
 @router.get("/facility-layout-heatmap/insights", response_model=ChartInsightsResponse)
 async def facility_layout_heatmap_insights():
+    title = "Facility Risk Heat Map"
     inc_df = get_incident_df()
     haz_df = get_hazard_df()
-    fig = plot_service.create_facility_layout_heatmap(inc_df, haz_df)
-    payload = ChartInsightsRequest(figure=fig.to_plotly_json(), title="Facility Layout Heatmap")
-    return await generate_chart_insights(payload)
+    def _zone_summary(df: pd.DataFrame, label: str):
+        if df is None or df.empty:
+            return None
+        zones = getattr(plot_service, 'FACILITY_ZONES', {})
+        rows = []
+        for zone_name, info in zones.items():
+            count = 0
+            sev_sum = 0.0
+            risk_sum = 0.0
+            for col in ['location.1','sublocation','location']:
+                if col in df.columns:
+                    m = df[df[col].astype(str).str.contains(zone_name, case=False, na=False)]
+                    count += len(m)
+                    if 'severity_score' in df.columns:
+                        sev_sum += pd.to_numeric(m['severity_score'], errors='coerce').fillna(0).sum()
+                    if 'risk_score' in df.columns:
+                        risk_sum += pd.to_numeric(m['risk_score'], errors='coerce').fillna(0).sum()
+            avg_sev = (sev_sum / count) if count > 0 else 0.0
+            avg_risk = (risk_sum / count) if count > 0 else 0.0
+            rows.append({'zone': zone_name, 'area': info.get('area'), 'count': int(count), 'avg_severity': float(avg_sev), 'avg_risk': float(avg_risk)})
+        rows = [r for r in rows if r['count'] > 0]
+        rows.sort(key=lambda r: r['count'], reverse=True)
+        return {'label': label, 'top_by_count': rows[:5], 'top_by_risk': sorted(rows, key=lambda r: r['avg_risk'], reverse=True)[:5]}
+    inc = _zone_summary(inc_df, 'Incidents')
+    haz = _zone_summary(haz_df, 'Hazards')
+    summary = {'title': title, 'incidents': inc, 'hazards': haz}
+    try:
+        prompt = "Summarize top facility zones by incidents and risk for incidents and hazards; include actions."
+        md = ask_openai(prompt, context=json.dumps(summary, ensure_ascii=False), model="gpt-4o", code_mode=False, multi_df=False)
+        if md and not md.lower().startswith("openai") and "not installed" not in md.lower():
+            return ChartInsightsResponse(insights_md=md)
+    except Exception:
+        pass
+    parts = [f"## {title}"]
+    if inc and inc['top_by_count']:
+        r = inc['top_by_count'][0]
+        parts.append(f"- **Incidents hotspot**: {r['zone']} ({r['count']})")
+    if haz and haz['top_by_count']:
+        r = haz['top_by_count'][0]
+        parts.append(f"- **Hazards hotspot**: {r['zone']} ({r['count']})")
+    parts.append("\n### Recommendations")
+    parts.append("- **Action**: Conduct targeted inspections in hotspot zones.")
+    parts.append("- **Action**: Strengthen controls in high-risk areas.")
+    return ChartInsightsResponse(insights_md="\n".join(parts))
 
 
 @router.get("/facility-3d-heatmap", response_model=PlotlyFigureResponse)
@@ -244,10 +1150,42 @@ async def facility_3d_heatmap_insights(
     dataset: str = Query("incident", description="Dataset to use: incident or hazard"),
     event_type: str = Query("Incidents", description="Label for the 3D surface legend/title"),
 ):
+    title = f"3D {event_type} Heat Map"
     df = get_incident_df() if (dataset or "incident").lower() == "incident" else get_hazard_df()
-    fig = plot_service.create_3d_facility_heatmap(df, event_type=event_type)
-    payload = ChartInsightsRequest(figure=fig.to_plotly_json(), title="Facility 3D Heatmap")
-    return await generate_chart_insights(payload)
+    # Provide zone-based summary similar to 2D layout
+    if df is None or df.empty:
+        return ChartInsightsResponse(insights_md=f"## {title}\n\n- **Summary**: Not enough data to analyze.")
+    zones = getattr(plot_service, 'FACILITY_ZONES', {})
+    rows = []
+    for zone_name, _ in zones.items():
+        count = 0
+        sev_sum = 0.0
+        for col in ['location.1','sublocation','location']:
+            if col in df.columns:
+                m = df[df[col].astype(str).str.contains(zone_name, case=False, na=False)]
+                count += len(m)
+                if 'severity_score' in df.columns:
+                    sev_sum += pd.to_numeric(m['severity_score'], errors='coerce').fillna(0).sum()
+        avg_sev = (sev_sum / count) if count > 0 else 0.0
+        rows.append({'zone': zone_name, 'count': int(count), 'avg_severity': float(avg_sev)})
+    rows = [r for r in rows if r['count'] > 0]
+    top_count = sorted(rows, key=lambda r: r['count'], reverse=True)[:5]
+    summary = {'title': title, 'event_type': event_type, 'top_zones': top_count}
+    try:
+        prompt = "Summarize 3D heat map hotspots (zones with highest counts/severity) with actions."
+        md = ask_openai(prompt, context=json.dumps(summary, ensure_ascii=False), model="gpt-4o", code_mode=False, multi_df=False)
+        if md and not md.lower().startswith("openai") and "not installed" not in md.lower():
+            return ChartInsightsResponse(insights_md=md)
+    except Exception:
+        pass
+    parts = [f"## {title}"]
+    if top_count:
+        r = top_count[0]
+        parts.append(f"- **Top zone**: {r['zone']} ({r['count']}) — avg severity {r['avg_severity']:.2f}")
+    parts.append("\n### Recommendations")
+    parts.append("- **Action**: Prioritize mitigation in highest-intensity 3D zones.")
+    parts.append("- **Action**: Compare with 2D layout hotspots for consistency.")
+    return ChartInsightsResponse(insights_md="\n".join(parts))
 
 
 @router.post("/insights", response_model=ChartInsightsResponse)
@@ -256,7 +1194,32 @@ async def generate_chart_insights(payload: ChartInsightsRequest) -> ChartInsight
     Heuristic summary first, then optionally refined with LLM if available.
     """
     fig = payload.figure or {}
-    title = payload.title or fig.get("layout", {}).get("title") or "Chart"
+    title = (
+        payload.title
+        or ((fig.get("layout", {}) or {}).get("title", {}) or {}).get("text")
+        or (fig.get("layout", {}) or {}).get("title")
+        or "Chart"
+    )
+
+    # Prefer OpenAI-based generator for insights; fallback to heuristic if it fails
+    try:
+        generator = PlotlyInsightsGenerator()
+        extracted = generator.extractor.extract_all_data(fig)
+        insight_types = [InsightType.EXECUTIVE_SUMMARY]
+        if len(extracted.get("traces", [])) > 1:
+            insight_types.append(InsightType.TRENDS)
+        if any(((t.get("statistics", {}) or {}).get("std", 0) not in (None, 0)) for t in extracted.get("traces", [])):
+            insight_types.append(InsightType.ANOMALIES)
+        insight_types.append(InsightType.RECOMMENDATIONS)
+        insights_md = generator.generate_insights(
+            fig=fig,
+            insight_types=insight_types,
+            business_context=payload.context,
+            tone="professional",
+        )
+        return ChartInsightsResponse(insights_md=insights_md)
+    except Exception:
+        pass
 
     def _coerce_num(arr):
         try:
@@ -587,52 +1550,6 @@ async def insights_for_chart(chart: str, dataset: str = Query("incident"), event
     payload = ChartInsightsRequest(figure=fig.to_plotly_json(), title=title)
     resp = await generate_chart_insights(payload)  # type: ignore[arg-type]
     return resp
-
-    # Default recommendations
-    if not recs:
-        recs = [
-            "Highlight the top contributors to focus improvement efforts.",
-            "Investigate outliers and recent changes for root causes.",
-            "Track this metric monthly and set targets for the next quarter.",
-        ]
-
-    # Build initial markdown
-    parts = [f"## {title}"]
-    if series_stats:
-        for s in series_stats[:3]:
-            parts.append(
-                f"- **{s['name']}** — min: {s['min']:.1f}, max: {s['max']:.1f}, mean: {s['mean']:.1f}, total: {s['sum']:.1f}"
-            )
-    if findings:
-        parts.append("\n### Key insights")
-        for f in findings:
-            parts.append(f"- **Insight**: {f}")
-    parts.append("\n### Recommendations")
-    for r in recs:
-        parts.append(f"- **Action**: {r}")
-
-    base_md = "\n".join(parts)
-
-    # Optionally refine with LLM if available
-    try:
-        context_chunks = [
-            f"Title: {title}",
-            f"User context: {payload.context or 'N/A'}",
-            "Heuristic summary:\n" + base_md,
-        ]
-        llm_md = ask_openai(
-            "Rewrite the heuristic chart summary into a clear, layman-friendly report. Use Markdown with sections: Summary, Key Insights (bullets), Recommendations (bullets). Keep it concise and avoid jargon.",
-            context="\n\n".join(context_chunks),
-            model="gpt-4o",
-            code_mode=False,
-            multi_df=False,
-        )
-        if llm_md and not llm_md.lower().startswith("openai") and "not installed" not in llm_md.lower():
-            return ChartInsightsResponse(insights_md=llm_md)
-    except Exception:
-        pass
-
-    return ChartInsightsResponse(insights_md=base_md)
 
 
 @router.post("/insights/from-data", response_model=ChartInsightsResponse)

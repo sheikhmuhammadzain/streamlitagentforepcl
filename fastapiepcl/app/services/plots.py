@@ -87,11 +87,22 @@ def create_risk_calendar_heatmap(df: Optional[pd.DataFrame]):
     if df is None or 'occurrence_date' not in df.columns or 'department' not in df.columns or 'risk_score' not in df.columns:
         return go.Figure()
     cp = df.copy()
+    # Coerce risk_score to numeric to ensure mean aggregation works
+    cp['risk_score'] = pd.to_numeric(cp['risk_score'], errors='coerce')
     cp['month'] = pd.to_datetime(cp['occurrence_date'], errors='coerce').dt.to_period('M')
     risk_pivot = cp.pivot_table(values='risk_score', index='department', columns='month', aggfunc='mean')
+    z = risk_pivot.to_numpy()
+    # If no finite values in mean risk matrix, fallback to counts
+    if not (isinstance(z, np.ndarray) and np.isfinite(z).any()):
+        count_pivot = cp.pivot_table(values='risk_score', index='department', columns='month', aggfunc='count')
+        z = count_pivot.to_numpy()
+        x_labels = count_pivot.columns.astype(str).tolist()
+        y_labels = count_pivot.index.astype(str).tolist()
+        fig = px.imshow(z, labels=dict(x='Month', y='Department', color='Count'), x=x_labels, y=y_labels, color_continuous_scale='YlOrRd', title='Department Events Count (Fallback)', aspect='auto', text_auto=True)
+        fig.update_xaxes(tickangle=-45)
+        return fig
     x_labels = risk_pivot.columns.astype(str).tolist()
     y_labels = risk_pivot.index.astype(str).tolist()
-    z = risk_pivot.to_numpy()
     fig = px.imshow(z, labels=dict(x='Month', y='Department', color='Avg Risk Score'), x=x_labels, y=y_labels, color_continuous_scale='RdYlGn_r', title='Department Risk Score Evolution', aspect='auto', text_auto=True)
     fig.update_xaxes(tickangle=-45)
     return fig
