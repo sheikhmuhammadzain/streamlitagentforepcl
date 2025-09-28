@@ -34,6 +34,62 @@ def add_coordinates_to_df(df: pd.DataFrame, location_coords: dict) -> pd.DataFra
 def build_combined_map_html(inc_df: pd.DataFrame, haz_df: pd.DataFrame) -> str:
     inc = inc_df.copy()
     haz = haz_df.copy()
+    # Try to infer latitude/longitude from common alternative column names
+    def _ensure_lat_lon(df: pd.DataFrame) -> pd.DataFrame:
+        if 'latitude' not in df.columns:
+            for cand in ['lat', 'Lat', 'LAT', 'Latitude', 'LATITUDE']:
+                if cand in df.columns:
+                    df['latitude'] = pd.to_numeric(df[cand], errors='coerce')
+                    break
+        if 'longitude' not in df.columns:
+            for cand in ['lon', 'Lon', 'LON', 'lng', 'Lng', 'LNG', 'long', 'Long', 'LONG', 'Longitude', 'LONGITUDE']:
+                if cand in df.columns:
+                    df['longitude'] = pd.to_numeric(df[cand], errors='coerce')
+                    break
+        # Ensure expected coordinate columns exist to avoid KeyError
+        if 'latitude' not in df.columns:
+            df['latitude'] = pd.NA
+        if 'longitude' not in df.columns:
+            df['longitude'] = pd.NA
+        return df
+
+    inc = _ensure_lat_lon(inc)
+    haz = _ensure_lat_lon(haz)
+
+    # If coordinates are still missing, synthesize deterministic fallback positions
+    def _synthesize_coords(df: pd.DataFrame) -> pd.DataFrame:
+        if df.empty:
+            return df
+        base_lat, base_lon = 24.8607, 67.0011  # Karachi (EPCL vicinity) as default center
+        # choose a key column to group by location semantics
+        key_col = 'location.1' if 'location.1' in df.columns else (
+            'sublocation' if 'sublocation' in df.columns else (
+            'location' if 'location' in df.columns else (
+            'department' if 'department' in df.columns else (
+            'Department' if 'Department' in df.columns else (
+            'title' if 'title' in df.columns else (
+            'incident_id' if 'incident_id' in df.columns else None))))))
+        if key_col is None:
+            # fallback to index values as grouping key
+            df = df.copy()
+            df['_fallback_index_key'] = df.index.astype(str)
+            key_col = '_fallback_index_key'
+        lat_nan = df['latitude'].isna()
+        lon_nan = df['longitude'].isna()
+        mask = lat_nan | lon_nan
+        if not mask.any():
+            return df
+        keys = df.loc[mask, key_col].astype(str).fillna('Unknown')
+        h = pd.util.hash_pandas_object(keys, index=False).astype(np.uint32)
+        # spread within roughly +/- ~220 meters (0.002 degrees) from base
+        lat_off = ((h % 1000) / 1000.0 - 0.5) * 0.004
+        lon_off = (((h // 1000) % 1000) / 1000.0 - 0.5) * 0.004
+        df.loc[mask, 'latitude'] = pd.to_numeric(df.loc[mask, 'latitude'], errors='coerce').fillna(base_lat) + lat_off.values
+        df.loc[mask, 'longitude'] = pd.to_numeric(df.loc[mask, 'longitude'], errors='coerce').fillna(base_lon) + lon_off.values
+        return df
+
+    inc = _synthesize_coords(inc)
+    haz = _synthesize_coords(haz)
     inc_coords = inc.dropna(subset=['latitude', 'longitude']) if not inc.empty else pd.DataFrame()
     haz_coords = haz.dropna(subset=['latitude', 'longitude']) if not haz.empty else pd.DataFrame()
 
@@ -53,14 +109,18 @@ def build_combined_map_html(inc_df: pd.DataFrame, haz_df: pd.DataFrame) -> str:
         if len(inc_coords) > 3000:
             inc_coords = inc_coords.sample(3000, random_state=42)
             w = w.loc[inc_coords.index]
-        HeatMap(list(zip(inc_coords['latitude'].astype(float), inc_coords['longitude'].astype(float), w.astype(float))), name='Incidents Heat', min_opacity=0.25, radius=18, blur=12, gradient={0.0: '#3b82f6', 0.5: '#fde047', 0.75: '#f59e0b', 1.0: '#dc2626'}).add_to(m)
+        fg_inc = folium.FeatureGroup(name='Incidents Heat', show=True)
+        HeatMap(list(zip(inc_coords['latitude'].astype(float), inc_coords['longitude'].astype(float), w.astype(float))), min_opacity=0.25, radius=18, blur=12, gradient={0.0: '#3b82f6', 0.5: '#fde047', 0.75: '#f59e0b', 1.0: '#dc2626'}).add_to(fg_inc)
+        fg_inc.add_to(m)
 
     if not haz_coords.empty:
         w = pd.to_numeric(haz_coords.get('severity_score', pd.Series(1.0, index=haz_coords.index)), errors='coerce').fillna(1.0) / 5.0
         if len(haz_coords) > 3000:
             haz_coords = haz_coords.sample(3000, random_state=42)
             w = w.loc[haz_coords.index]
-        HeatMap(list(zip(haz_coords['latitude'].astype(float), haz_coords['longitude'].astype(float), w.astype(float))), name='Hazards Heat', min_opacity=0.25, radius=18, blur=12, gradient={0.0: '#16a34a', 0.5: '#facc15', 0.75: '#f59e0b', 1.0: '#7f1d1d'}).add_to(m)
+        fg_haz = folium.FeatureGroup(name='Hazards Heat', show=True)
+        HeatMap(list(zip(haz_coords['latitude'].astype(float), haz_coords['longitude'].astype(float), w.astype(float))), min_opacity=0.25, radius=18, blur=12, gradient={0.0: '#16a34a', 0.5: '#facc15', 0.75: '#f59e0b', 1.0: '#7f1d1d'}).add_to(fg_haz)
+        fg_haz.add_to(m)
 
     def _labels_layer(df: pd.DataFrame, name: str, color: str, max_labels: int = 20):
         if df.empty:
