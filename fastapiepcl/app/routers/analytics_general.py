@@ -247,8 +247,8 @@ async def data_inspection_top_findings():
 
 
 @router.get("/data/incident-cost-trend")
-async def data_incident_cost_trend():
-    df = get_incident_df()
+async def data_incident_cost_trend(dataset: str = Query("incident")):
+    df = get_incident_df() if (dataset or "incident").lower() == "incident" else get_hazard_df()
     if df is None or df.empty:
         return JSONResponse(content={"labels": [], "series": []})
     date_col = _resolve_column(df, ["occurrence_date", "date of occurrence", "date reported"]) or df.columns[0]
@@ -262,6 +262,11 @@ async def data_incident_cost_trend():
         "labels": grp.index.tolist(),
         "series": [{"name": "Total Cost", "data": grp["cost"].round(0).fillna(0).astype(float).tolist()}],
     })
+
+
+@router.get("/data/hazard-cost-trend")
+async def data_hazard_cost_trend():
+    return await data_incident_cost_trend(dataset="hazard")
 
 
 @router.get("/data/ppe-violation-analysis")
