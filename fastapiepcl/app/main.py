@@ -11,6 +11,7 @@ from .routers import (
     analytics_advanced,
     analytics_predictive,
     filters,
+    data_health,
     agent,
     data,
 )
@@ -43,6 +44,7 @@ def create_app() -> FastAPI:
     app.include_router(analytics_advanced.router)
     app.include_router(analytics_predictive.router)
     app.include_router(filters.router)
+    app.include_router(data_health.router)
     app.include_router(agent.router)
     app.include_router(data.router)
 
