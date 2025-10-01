@@ -2,7 +2,18 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 # Routers
-from .routers import workbooks, wordclouds, maps, analytics_general, analytics_conversion, agent, data
+from .routers import (
+    workbooks,
+    wordclouds,
+    maps,
+    analytics_general,
+    analytics_conversion,
+    analytics_advanced,
+    analytics_predictive,
+    filters,
+    agent,
+    data,
+)
 
 
 def create_app() -> FastAPI:
@@ -29,6 +40,9 @@ def create_app() -> FastAPI:
     app.include_router(maps.router)
     app.include_router(analytics_general.router)
     app.include_router(analytics_conversion.router)
+    app.include_router(analytics_advanced.router)
+    app.include_router(analytics_predictive.router)
+    app.include_router(filters.router)
     app.include_router(agent.router)
     app.include_router(data.router)
 
