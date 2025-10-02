@@ -31,7 +31,8 @@ def read_excel_to_sheets(content: bytes) -> Dict[str, pd.DataFrame]:
     """Read an Excel workbook (bytes) and return dict of sheet_name -> DataFrame.
     Datetime-like columns will be coerced using best-effort rules.
     """
-    xls = pd.ExcelFile(content)
+    from io import BytesIO
+    xls = pd.ExcelFile(BytesIO(content))
     sheets: Dict[str, pd.DataFrame] = {}
     for sheet in xls.sheet_names:
         try:

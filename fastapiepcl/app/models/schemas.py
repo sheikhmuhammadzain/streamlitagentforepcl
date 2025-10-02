@@ -129,6 +129,9 @@ class AgentRunResponse(BaseModel):
     figure: Optional[Dict[str, Any]] = None
     mpl_png_base64: Optional[str] = None
     analysis: str
+    attempts: int = Field(default=1, description="Number of self-correction attempts made")
+    verification_score: float = Field(default=0.0, description="Confidence score (0.0-1.0) from result verification")
+    correction_log: List[str] = Field(default_factory=list, description="Detailed log of self-correction process")
 
 
 # ---------- Insights from charts ----------

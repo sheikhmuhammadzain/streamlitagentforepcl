@@ -5,6 +5,8 @@ numpy>=1.26
 matplotlib>=3.8
 openpyxl>=3.1
 openai>=1.35  # optional, for HSE Data Agent
+langgraph>=0.2.74  # for state graph workflow
+langchain-core>=0.3.0  # for LangGraph dependencies
 wordcloud>=1.9.3
 
 fastapi>=0.111

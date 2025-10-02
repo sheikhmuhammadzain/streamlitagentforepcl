@@ -1,0 +1,586 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tool-Based Agent - WebSocket Test</title>
+    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            overflow: hidden;
+        }
+        
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+        
+        .header h1 {
+            font-size: 2rem;
+            margin-bottom: 10px;
+        }
+        
+        .status {
+            padding: 15px 30px;
+            background: #f7fafc;
+            border-bottom: 1px solid #e2e8f0;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        .status-indicator {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: #cbd5e0;
+        }
+        
+        .status-indicator.connected {
+            background: #48bb78;
+            animation: pulse 2s infinite;
+        }
+        
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+        
+        .content {
+            padding: 30px;
+            max-height: 600px;
+            overflow-y: auto;
+        }
+        
+        .input-section {
+            padding: 20px 30px;
+            background: #f7fafc;
+            border-top: 1px solid #e2e8f0;
+        }
+        
+        .input-group {
+            display: flex;
+            gap: 10px;
+        }
+        
+        input {
+            flex: 1;
+            padding: 15px;
+            border: 2px solid #e2e8f0;
+            border-radius: 10px;
+            font-size: 16px;
+            transition: border-color 0.3s;
+        }
+        
+        input:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+        
+        button {
+            padding: 15px 30px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 10px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.2s;
+        }
+        
+        button:hover {
+            transform: translateY(-2px);
+        }
+        
+        button:active {
+            transform: translateY(0);
+        }
+        
+        .event {
+            margin-bottom: 20px;
+            padding: 15px;
+            border-radius: 10px;
+            animation: slideIn 0.3s ease-out;
+        }
+        
+        @keyframes slideIn {
+            from {
+                opacity: 0;
+                transform: translateY(10px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+        
+        .event-start {
+            background: #e6fffa;
+            border-left: 4px solid #38b2ac;
+        }
+        
+        .event-thinking {
+            background: #fef5e7;
+            border-left: 4px solid #f39c12;
+        }
+        
+        .event-tool-call {
+            background: #ebf8ff;
+            border-left: 4px solid #4299e1;
+        }
+        
+        .event-tool-result {
+            background: #f0fff4;
+            border-left: 4px solid #48bb78;
+        }
+        
+        .event-answer {
+            background: #faf5ff;
+            border-left: 4px solid #9f7aea;
+        }
+        
+        .event-complete {
+            background: #f0fff4;
+            border-left: 4px solid #38a169;
+        }
+        
+        .event-error {
+            background: #fff5f5;
+            border-left: 4px solid #f56565;
+        }
+        
+        .event-type {
+            font-weight: 600;
+            color: #2d3748;
+            margin-bottom: 5px;
+        }
+        
+        .event-content {
+            color: #4a5568;
+            line-height: 1.6;
+        }
+        
+        pre {
+            background: #2d3748;
+            color: #e2e8f0;
+            padding: 15px;
+            border-radius: 8px;
+            overflow-x: auto;
+            margin-top: 10px;
+        }
+        
+        .tool-info {
+            display: flex;
+            gap: 10px;
+            margin-top: 10px;
+        }
+        
+        .tool-badge {
+            background: #4299e1;
+            color: white;
+            padding: 5px 10px;
+            border-radius: 5px;
+            font-size: 14px;
+            font-weight: 600;
+        }
+        
+        .thinking-text {
+            font-family: 'Courier New', monospace;
+            white-space: pre-wrap;
+            line-height: 1.8;
+        }
+        
+        .table-container {
+            overflow-x: auto;
+            margin-top: 10px;
+        }
+        
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            background: white;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        
+        th {
+            background: #667eea;
+            color: white;
+            padding: 12px;
+            text-align: left;
+            font-weight: 600;
+        }
+        
+        td {
+            padding: 10px 12px;
+            border-bottom: 1px solid #e2e8f0;
+        }
+        
+        tr:hover {
+            background: #f7fafc;
+        }
+        
+        .chart-container {
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            margin-top: 10px;
+            min-height: 400px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🤖 Tool-Based AI Agent</h1>
+            <p>Powered by Function Calling & WebSocket Streaming</p>
+        </div>
+        
+        <div class="status">
+            <div class="status-indicator" id="statusIndicator"></div>
+            <span id="statusText">Disconnected</span>
+        </div>
+        
+        <div class="content" id="content">
+            <p style="color: #718096; text-align: center; padding: 40px;">
+                Enter a question below to start...
+            </p>
+        </div>
+        
+        <div class="input-section">
+            <div class="input-group">
+                <input 
+                    type="text" 
+                    id="queryInput" 
+                    placeholder="Ask a question (e.g., 'Show top 10 departments with most incidents')"
+                />
+                <button onclick="sendQuery()">Send</button>
+                <button onclick="clearContent()" style="background: #718096;">Clear</button>
+            </div>
+            <div style="margin-top: 10px; color: #718096; font-size: 14px;">
+                Press Enter to send • Model: Llama 3.1 8B (Free)
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let ws = null;
+        let thinkingBuffer = "";
+        
+        function updateStatus(text, connected = false) {
+            document.getElementById('statusText').textContent = text;
+            const indicator = document.getElementById('statusIndicator');
+            if (connected) {
+                indicator.classList.add('connected');
+            } else {
+                indicator.classList.remove('connected');
+            }
+        }
+        
+        function addEvent(type, content) {
+            const contentDiv = document.getElementById('content');
+            
+            // Remove placeholder
+            if (contentDiv.children.length === 1 && contentDiv.children[0].tagName === 'P') {
+                contentDiv.innerHTML = '';
+            }
+            
+            const eventDiv = document.createElement('div');
+            eventDiv.className = `event event-${type}`;
+            
+            const typeDiv = document.createElement('div');
+            typeDiv.className = 'event-type';
+            typeDiv.textContent = getEventTitle(type);
+            
+            const contentDiv2 = document.createElement('div');
+            contentDiv2.className = 'event-content';
+            contentDiv2.innerHTML = content;
+            
+            eventDiv.appendChild(typeDiv);
+            eventDiv.appendChild(contentDiv2);
+            
+            contentDiv.appendChild(eventDiv);
+            contentDiv.scrollTop = contentDiv.scrollHeight;
+            
+            return eventDiv;
+        }
+        
+        function getEventTitle(type) {
+            const titles = {
+                'start': '🚀 Starting',
+                'thinking': '🤔 Thinking',
+                'tool-call': '🔧 Tool Call',
+                'tool-result': '✅ Tool Result',
+                'answer': '💬 Answer',
+                'complete': '✅ Complete',
+                'error': '❌ Error'
+            };
+            return titles[type] || type;
+        }
+        
+        function sendQuery() {
+            const input = document.getElementById('queryInput');
+            const question = input.value.trim();
+            
+            if (!question) {
+                alert('Please enter a question');
+                return;
+            }
+            
+            // Close existing connection
+            if (ws) {
+                ws.close();
+            }
+            
+            // Create WebSocket connection
+            const url = `ws://localhost:8000/ws/agent/stream?` +
+                       `question=${encodeURIComponent(question)}` +
+                       `&model=x-ai/grok-4-fast:free`;
+            
+            ws = new WebSocket(url);
+            
+            ws.onopen = () => {
+                updateStatus('Connected - Streaming...', true);
+                console.log('✅ WebSocket connected');
+            };
+            
+            ws.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                console.log('📡 Event:', data);
+                
+                switch(data.type) {
+                    case 'start':
+                        addEvent('start', data.message);
+                        break;
+                        
+                    case 'thinking':
+                        addEvent('thinking', data.message);
+                        thinkingBuffer = "";
+                        break;
+                        
+                    case 'thinking_token':
+                        // Stream thinking tokens in real-time
+                        thinkingBuffer += data.token;
+                        const thinkingDiv = document.querySelector('.event-thinking:last-child .thinking-text');
+                        if (thinkingDiv) {
+                            thinkingDiv.textContent = thinkingBuffer;
+                        } else {
+                            addEvent('thinking', `<div class="thinking-text">${thinkingBuffer}</div>`);
+                        }
+                        break;
+                        
+                    case 'tool_call_building':
+                        // Show tool being built
+                        console.log(`🔧 Building: ${data.tool}(${data.partial_args})`);
+                        break;
+                        
+                    case 'tool_call':
+                        const toolContent = `
+                            <div class="tool-info">
+                                <span class="tool-badge">${data.tool}</span>
+                            </div>
+                            <pre>${JSON.stringify(data.arguments, null, 2)}</pre>
+                        `;
+                        addEvent('tool-call', toolContent);
+                        break;
+                        
+                    case 'tool_result':
+                        let resultParsed;
+                        try {
+                            resultParsed = JSON.parse(data.result);
+                        } catch(e) {
+                            resultParsed = null;
+                        }
+                        
+                        let resultContent = `
+                            <div class="tool-info">
+                                <span class="tool-badge">${data.tool}</span>
+                            </div>
+                        `;
+                        
+                        // Render table if available
+                        if (resultParsed && resultParsed.table && Array.isArray(resultParsed.table)) {
+                            resultContent += renderTable(resultParsed.table);
+                        }
+                        
+                        // Render chart if available
+                        if (resultParsed && resultParsed.chart_type) {
+                            const chartId = 'chart_' + Date.now();
+                            resultContent += `<div class="chart-container" id="${chartId}"></div>`;
+                            addEvent('tool-result', resultContent);
+                            renderChart(chartId, resultParsed);
+                        } else {
+                            resultContent += `<pre>${data.result}</pre>`;
+                            addEvent('tool-result', resultContent);
+                        }
+                        break;
+                        
+                    case 'answer_complete':
+                        addEvent('answer', `<div style="white-space: pre-wrap;">${data.content}</div>`);
+                        break;
+                        
+                    case 'complete':
+                        addEvent('complete', `
+                            Analysis complete!<br>
+                            <strong>Iterations:</strong> ${data.data.iterations}<br>
+                            <strong>Tools Used:</strong> ${data.data.tools_used}
+                        `);
+                        updateStatus('Complete', false);
+                        ws.close();
+                        break;
+                        
+                    case 'error':
+                        addEvent('error', `<strong>Error:</strong> ${data.message}`);
+                        updateStatus('Error', false);
+                        break;
+                }
+            };
+            
+            ws.onerror = (error) => {
+                console.error('❌ WebSocket error:', error);
+                updateStatus('Error - Connection failed', false);
+                addEvent('error', 'WebSocket connection failed. Make sure the server is running.');
+            };
+            
+            ws.onclose = () => {
+                console.log('Connection closed');
+                if (document.getElementById('statusText').textContent.includes('Streaming')) {
+                    updateStatus('Disconnected', false);
+                }
+            };
+            
+            input.value = '';
+        }
+        
+        function renderTable(tableData) {
+            if (!tableData || tableData.length === 0) return '';
+            
+            const headers = Object.keys(tableData[0]);
+            let html = '<div class="table-container"><table>';
+            
+            // Headers
+            html += '<thead><tr>';
+            headers.forEach(h => {
+                html += `<th>${h}</th>`;
+            });
+            html += '</tr></thead>';
+            
+            // Rows
+            html += '<tbody>';
+            tableData.forEach(row => {
+                html += '<tr>';
+                headers.forEach(h => {
+                    html += `<td>${row[h] !== null && row[h] !== undefined ? row[h] : ''}</td>`;
+                });
+                html += '</tr>';
+            });
+            html += '</tbody></table></div>';
+            
+            return html;
+        }
+        
+        function renderChart(chartId, chartData) {
+            setTimeout(() => {
+                const element = document.getElementById(chartId);
+                if (!element) return;
+                
+                let plotData, layout;
+                
+                if (chartData.chart_type === 'pie') {
+                    plotData = [{
+                        type: 'pie',
+                        labels: chartData.labels,
+                        values: chartData.values,
+                        hole: 0.3
+                    }];
+                    layout = {
+                        title: chartData.title,
+                        height: 400
+                    };
+                } else if (chartData.chart_type === 'bar') {
+                    plotData = [{
+                        type: 'bar',
+                        x: chartData.x_data,
+                        y: chartData.y_data,
+                        marker: {color: '#667eea'}
+                    }];
+                    layout = {
+                        title: chartData.title,
+                        xaxis: {title: chartData.x_label},
+                        yaxis: {title: chartData.y_label},
+                        height: 400
+                    };
+                } else if (chartData.chart_type === 'line') {
+                    plotData = [{
+                        type: 'scatter',
+                        mode: 'lines+markers',
+                        x: chartData.x_data,
+                        y: chartData.y_data,
+                        line: {color: '#667eea', width: 2}
+                    }];
+                    layout = {
+                        title: chartData.title,
+                        xaxis: {title: chartData.x_label},
+                        yaxis: {title: chartData.y_label},
+                        height: 400
+                    };
+                } else if (chartData.chart_type === 'scatter') {
+                    plotData = [{
+                        type: 'scatter',
+                        mode: 'markers',
+                        x: chartData.x_data,
+                        y: chartData.y_data,
+                        marker: {color: '#667eea', size: 8}
+                    }];
+                    layout = {
+                        title: chartData.title,
+                        xaxis: {title: chartData.x_label},
+                        yaxis: {title: chartData.y_label},
+                        height: 400
+                    };
+                }
+                
+                Plotly.newPlot(chartId, plotData, layout, {responsive: true});
+            }, 100);
+        }
+        
+        function clearContent() {
+            document.getElementById('content').innerHTML = `
+                <p style="color: #718096; text-align: center; padding: 40px;">
+                    Enter a question below to start...
+                </p>
+            `;
+        }
+        
+        // Allow Enter key to send
+        document.addEventListener('DOMContentLoaded', () => {
+            document.getElementById('queryInput').addEventListener('keypress', (e) => {
+                if (e.key === 'Enter') {
+                    sendQuery();
+                }
+            });
+        });
+    </script>
+</body>
+</html>
