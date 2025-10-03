@@ -1,5 +1,6 @@
 from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
+from datetime import datetime
 
 
 # ---------- Generic data structures ----------
@@ -156,3 +157,58 @@ class DataInsightsRequest(BaseModel):
     top_n: int = Field(default=5, ge=1, le=50)
     refine_with_llm: bool = Field(default=True, description="If true and LLM is available, rewrite insights in layman-friendly style")
     model: Optional[str] = Field(default="gpt-4o", description="LLM model to use if refinement is enabled")
+
+
+# ---------- Flexible Filtering for Analytics ----------
+class AnalyticsFilters(BaseModel):
+    """Flexible filters for analytics endpoints to enable dynamic data filtering."""
+    dataset: str = Field(default="incident", description="Dataset to use: 'incident' or 'hazard'")
+    start_date: Optional[str] = Field(default=None, description="Start date filter (ISO format: YYYY-MM-DD)")
+    end_date: Optional[str] = Field(default=None, description="End date filter (ISO format: YYYY-MM-DD)")
+    departments: Optional[List[str]] = Field(default=None, description="Filter by specific departments")
+    locations: Optional[List[str]] = Field(default=None, description="Filter by specific locations")
+    sublocations: Optional[List[str]] = Field(default=None, description="Filter by specific sublocations")
+    min_severity: Optional[float] = Field(default=None, ge=0, le=5, description="Minimum severity score (0-5)")
+    max_severity: Optional[float] = Field(default=None, ge=0, le=5, description="Maximum severity score (0-5)")
+    min_risk: Optional[float] = Field(default=None, ge=0, le=5, description="Minimum risk score (0-5)")
+    max_risk: Optional[float] = Field(default=None, ge=0, le=5, description="Maximum risk score (0-5)")
+    statuses: Optional[List[str]] = Field(default=None, description="Filter by status values")
+    incident_types: Optional[List[str]] = Field(default=None, description="Filter by incident types")
+    violation_types: Optional[List[str]] = Field(default=None, description="Filter by violation types (for hazards)")
+
+
+# ---------- Filter Options (for frontend dropdowns) ----------
+class DateRangeInfo(BaseModel):
+    """Date range information from dataset."""
+    min_date: Optional[str] = Field(None, description="Earliest date in dataset (YYYY-MM-DD)")
+    max_date: Optional[str] = Field(None, description="Latest date in dataset (YYYY-MM-DD)")
+    total_records: int = Field(0, description="Total number of records with valid dates")
+
+
+class FilterOption(BaseModel):
+    """Single filter option with count."""
+    value: str = Field(description="The actual value")
+    label: str = Field(description="Display label for UI")
+    count: int = Field(description="Number of records with this value")
+
+
+class FilterOptionsResponse(BaseModel):
+    """Available filter options for a specific dataset."""
+    dataset: str = Field(description="Dataset name (incident or hazard)")
+    date_range: DateRangeInfo = Field(description="Date range information")
+    departments: List[FilterOption] = Field(default_factory=list, description="Available departments")
+    locations: List[FilterOption] = Field(default_factory=list, description="Available locations")
+    sublocations: List[FilterOption] = Field(default_factory=list, description="Available sublocations")
+    statuses: List[FilterOption] = Field(default_factory=list, description="Available statuses")
+    incident_types: List[FilterOption] = Field(default_factory=list, description="Available incident types")
+    violation_types: List[FilterOption] = Field(default_factory=list, description="Available violation types (hazards only)")
+    severity_range: Dict[str, float] = Field(default_factory=dict, description="Severity score range (min, max, avg)")
+    risk_range: Dict[str, float] = Field(default_factory=dict, description="Risk score range (min, max, avg)")
+    total_records: int = Field(0, description="Total records in dataset")
+
+
+class CombinedFilterOptionsResponse(BaseModel):
+    """Combined filter options from both incident and hazard datasets."""
+    incident: FilterOptionsResponse = Field(description="Filter options for incidents")
+    hazard: FilterOptionsResponse = Field(description="Filter options for hazards")
+    last_updated: str = Field(description="Timestamp when options were generated")

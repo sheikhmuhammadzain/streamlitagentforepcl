@@ -11,6 +11,9 @@ from ..models.schemas import (
     ChartInsightsRequest,
     ChartInsightsResponse,
     DataInsightsRequest,
+    AnalyticsFilters,
+    FilterOptionsResponse,
+    CombinedFilterOptionsResponse,
 )
 from ..services.excel import (
     get_incident_df,
@@ -23,6 +26,8 @@ from ..services.json_utils import to_native_json
 from ..services.agent import ask_openai
 from ..services.excel import payload_to_df
 from ..services.insights_generator import PlotlyInsightsGenerator, InsightType
+from ..services.filters import apply_analytics_filters, get_filter_summary
+from ..services.filter_options import extract_filter_options, extract_combined_filter_options
 
 
 router = APIRouter(prefix="/analytics", tags=["analytics"])
@@ -60,11 +65,133 @@ async def hse_scorecard():
     return JSONResponse(content={"figure": to_native_json(fig.to_plotly_json())})
 
 
+@router.get("/filter-options", response_model=FilterOptionsResponse)
+async def get_filter_options(
+    dataset: str = Query("incident", description="Dataset to use: 'incident' or 'hazard'")
+):
+    """
+    Get all available filter options for a specific dataset.
+    Returns unique values for departments, locations, statuses, types, etc.
+    Useful for populating frontend dropdown menus and filter UI components.
+    
+    Example:
+        GET /analytics/filter-options?dataset=incident
+        
+    Returns:
+        - Date range (min/max dates)
+        - Available departments with counts
+        - Available locations with counts
+        - Available statuses with counts
+        - Available incident/violation types with counts
+        - Severity and risk score ranges
+    """
+    df = get_incident_df() if (dataset or "incident").lower() == "incident" else get_hazard_df()
+    options = extract_filter_options(df, dataset)
+    return options
+
+
+@router.get("/filter-options/combined", response_model=CombinedFilterOptionsResponse)
+async def get_combined_filter_options():
+    """
+    Get all available filter options from both incident and hazard datasets.
+    Returns comprehensive filter options for building a unified filter UI.
+    
+    Example:
+        GET /analytics/filter-options/combined
+        
+    Returns:
+        - Filter options for incidents
+        - Filter options for hazards
+        - Timestamp of when options were generated
+    """
+    incident_df = get_incident_df()
+    hazard_df = get_hazard_df()
+    combined_options = extract_combined_filter_options(incident_df, hazard_df)
+    return combined_options
+
+
+@router.get("/filter-summary")
+async def get_filter_summary_endpoint(
+    dataset: str = Query("incident", description="Dataset to use: 'incident' or 'hazard'"),
+    start_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
+    end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
+    departments: Optional[List[str]] = Query(None, description="Filter by departments"),
+    locations: Optional[List[str]] = Query(None, description="Filter by locations"),
+    sublocations: Optional[List[str]] = Query(None, description="Filter by sublocations"),
+    min_severity: Optional[float] = Query(None, ge=0, le=5, description="Min severity"),
+    max_severity: Optional[float] = Query(None, ge=0, le=5, description="Max severity"),
+    min_risk: Optional[float] = Query(None, ge=0, le=5, description="Min risk"),
+    max_risk: Optional[float] = Query(None, ge=0, le=5, description="Max risk"),
+    statuses: Optional[List[str]] = Query(None, description="Filter by status"),
+    incident_types: Optional[List[str]] = Query(None, description="Filter by incident types"),
+    violation_types: Optional[List[str]] = Query(None, description="Filter by violation types"),
+):
+    """
+    Get a summary of how filters would affect the dataset without returning the full data.
+    Useful for UI to show filter impact before applying to charts.
+    """
+    df_original = get_incident_df() if (dataset or "incident").lower() == "incident" else get_hazard_df()
+    
+    df_filtered = apply_analytics_filters(
+        df_original,
+        start_date=start_date,
+        end_date=end_date,
+        departments=departments,
+        locations=locations,
+        sublocations=sublocations,
+        min_severity=min_severity,
+        max_severity=max_severity,
+        min_risk=min_risk,
+        max_risk=max_risk,
+        statuses=statuses,
+        incident_types=incident_types,
+        violation_types=violation_types,
+    )
+    
+    filters_dict = {
+        'dataset': dataset,
+        'start_date': start_date,
+        'end_date': end_date,
+        'departments': departments,
+        'locations': locations,
+        'sublocations': sublocations,
+        'min_severity': min_severity,
+        'max_severity': max_severity,
+        'min_risk': min_risk,
+        'max_risk': max_risk,
+        'statuses': statuses,
+        'incident_types': incident_types,
+        'violation_types': violation_types,
+    }
+    
+    summary = get_filter_summary(df_original, df_filtered, filters_dict)
+    
+    return JSONResponse(content=summary)
+
+
 # ----------------------- DATA (JSON) ENDPOINTS FOR FRONTEND --------------------
 
 @router.get("/data/incident-trend")
-async def data_incident_trend(dataset: str = Query("incident")):
+async def data_incident_trend(
+    dataset: str = Query("incident"),
+    start_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
+    end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
+    departments: Optional[List[str]] = Query(None, description="Filter by departments"),
+    locations: Optional[List[str]] = Query(None, description="Filter by locations"),
+    min_severity: Optional[float] = Query(None, ge=0, le=5, description="Min severity"),
+    max_severity: Optional[float] = Query(None, ge=0, le=5, description="Max severity"),
+    min_risk: Optional[float] = Query(None, ge=0, le=5, description="Min risk"),
+    max_risk: Optional[float] = Query(None, ge=0, le=5, description="Max risk"),
+):
     df = get_incident_df() if (dataset or "incident").lower() == "incident" else get_hazard_df()
+    
+    # Apply flexible filters
+    df = apply_analytics_filters(
+        df, start_date=start_date, end_date=end_date, departments=departments,
+        locations=locations, min_severity=min_severity, max_severity=max_severity,
+        min_risk=min_risk, max_risk=max_risk
+    )
+    
     if df is None or df.empty:
         return JSONResponse(content={"labels": [], "series": []})
     date_col = _resolve_column(df, ["occurrence_date", "date of occurrence", "date reported", "date entered"]) or df.columns[0]
@@ -77,8 +204,23 @@ async def data_incident_trend(dataset: str = Query("incident")):
 
 
 @router.get("/data/incident-type-distribution")
-async def data_incident_type_distribution(dataset: str = Query("incident")):
+async def data_incident_type_distribution(
+    dataset: str = Query("incident"),
+    start_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
+    end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
+    departments: Optional[List[str]] = Query(None, description="Filter by departments"),
+    locations: Optional[List[str]] = Query(None, description="Filter by locations"),
+    min_severity: Optional[float] = Query(None, ge=0, le=5, description="Min severity"),
+    max_severity: Optional[float] = Query(None, ge=0, le=5, description="Max severity"),
+):
     df = get_incident_df() if (dataset or "incident").lower() == "incident" else get_hazard_df()
+    
+    # Apply flexible filters
+    df = apply_analytics_filters(
+        df, start_date=start_date, end_date=end_date, departments=departments,
+        locations=locations, min_severity=min_severity, max_severity=max_severity
+    )
+    
     if df is None or df.empty:
         return JSONResponse(content={"labels": [], "series": []})
     type_col = _resolve_column(df, ["incident type(s)", "category", "accident type"]) or df.columns[0]
@@ -91,8 +233,26 @@ async def data_incident_type_distribution(dataset: str = Query("incident")):
 
 
 @router.get("/data/root-cause-pareto")
-async def data_root_cause_pareto(dataset: str = Query("incident")):
+async def data_root_cause_pareto(
+    dataset: str = Query("incident"),
+    start_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
+    end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
+    departments: Optional[List[str]] = Query(None, description="Filter by departments"),
+    locations: Optional[List[str]] = Query(None, description="Filter by locations"),
+    min_severity: Optional[float] = Query(None, ge=0, le=5, description="Min severity"),
+    max_severity: Optional[float] = Query(None, ge=0, le=5, description="Max severity"),
+    min_risk: Optional[float] = Query(None, ge=0, le=5, description="Min risk"),
+    max_risk: Optional[float] = Query(None, ge=0, le=5, description="Max risk"),
+):
     df = get_incident_df() if (dataset or "incident").lower() == "incident" else get_hazard_df()
+    
+    # Apply flexible filters
+    df = apply_analytics_filters(
+        df, start_date=start_date, end_date=end_date, departments=departments,
+        locations=locations, min_severity=min_severity, max_severity=max_severity,
+        min_risk=min_risk, max_risk=max_risk
+    )
+    
     if df is None or df.empty:
         return JSONResponse(content={"labels": [], "bars": [], "cum_pct": []})
     rc_col = _resolve_column(df, ["root cause"]) or df.columns[0]
@@ -132,8 +292,26 @@ async def data_injury_severity_pyramid(dataset: str = Query("incident")):
 
 
 @router.get("/data/department-month-heatmap")
-async def data_department_month_heatmap(dataset: str = Query("incident")):
+async def data_department_month_heatmap(
+    dataset: str = Query("incident"),
+    start_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
+    end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
+    departments: Optional[List[str]] = Query(None, description="Filter by departments"),
+    locations: Optional[List[str]] = Query(None, description="Filter by locations"),
+    min_severity: Optional[float] = Query(None, ge=0, le=5, description="Min severity"),
+    max_severity: Optional[float] = Query(None, ge=0, le=5, description="Max severity"),
+    min_risk: Optional[float] = Query(None, ge=0, le=5, description="Min risk"),
+    max_risk: Optional[float] = Query(None, ge=0, le=5, description="Max risk"),
+):
     df = get_incident_df() if (dataset or "incident").lower() == "incident" else get_hazard_df()
+    
+    # Apply flexible filters
+    df = apply_analytics_filters(
+        df, start_date=start_date, end_date=end_date, departments=departments,
+        locations=locations, min_severity=min_severity, max_severity=max_severity,
+        min_risk=min_risk, max_risk=max_risk
+    )
+    
     if df is None or df.empty:
         return JSONResponse(content={"x": [], "y": [], "z": [], "metric": "count"})
     dep_col = _resolve_column(df, ["department"]) or _resolve_column(df, ["section"]) or df.columns[0]

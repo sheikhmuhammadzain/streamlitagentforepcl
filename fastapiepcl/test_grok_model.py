@@ -53,7 +53,7 @@ def test_grok_model():
     # Test models to try
     models_to_test = [
         "x-ai/grok-4-fast:free",
-        "google/gemini-2.0-flash-exp:free",
+        "google/gemini-2.5-flash:free",
     ]
     
     for model in models_to_test:
