@@ -212,3 +212,49 @@ class CombinedFilterOptionsResponse(BaseModel):
     incident: FilterOptionsResponse = Field(description="Filter options for incidents")
     hazard: FilterOptionsResponse = Field(description="Filter options for hazards")
     last_updated: str = Field(description="Timestamp when options were generated")
+
+
+# ---------- Enhanced Chart Tooltips ----------
+class RecentItem(BaseModel):
+    """Recent incident/hazard item for tooltip."""
+    title: str = Field(description="Title or description of the item")
+    department: str = Field(description="Department where it occurred")
+    date: str = Field(description="Date of occurrence (YYYY-MM-DD)")
+    severity: Optional[float] = Field(None, description="Severity score")
+
+
+class CountItem(BaseModel):
+    """Count item for departments or types."""
+    name: str = Field(description="Name of the department/type")
+    count: int = Field(description="Count of items")
+
+
+class ScoreStats(BaseModel):
+    """Statistics for severity or risk scores."""
+    avg: float = Field(description="Average score")
+    max: float = Field(description="Maximum score")
+    min: float = Field(description="Minimum score")
+
+
+class MonthDetailedData(BaseModel):
+    """Detailed breakdown for a specific month."""
+    month: str = Field(description="Month label (YYYY-MM)")
+    total_count: int = Field(description="Total count for the month")
+    departments: List[CountItem] = Field(default_factory=list, description="Top departments")
+    types: List[CountItem] = Field(default_factory=list, description="Top incident/violation types")
+    severity: Optional[ScoreStats] = Field(None, description="Severity statistics")
+    risk: Optional[ScoreStats] = Field(None, description="Risk statistics")
+    recent_items: List[RecentItem] = Field(default_factory=list, description="Recent items (up to 5)")
+
+
+class ChartSeries(BaseModel):
+    """Chart series data."""
+    name: str = Field(description="Series name")
+    data: List[int] = Field(description="Series data points")
+
+
+class DetailedTrendResponse(BaseModel):
+    """Response with detailed breakdown for trend charts."""
+    labels: List[str] = Field(description="Month labels")
+    series: List[ChartSeries] = Field(description="Chart series")
+    details: List[MonthDetailedData] = Field(default_factory=list, description="Detailed breakdown per month")

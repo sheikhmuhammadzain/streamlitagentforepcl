@@ -14,6 +14,12 @@ from ..models.schemas import (
     AnalyticsFilters,
     FilterOptionsResponse,
     CombinedFilterOptionsResponse,
+    DetailedTrendResponse,
+    MonthDetailedData,
+    CountItem,
+    ScoreStats,
+    RecentItem,
+    ChartSeries,
 )
 from ..services.excel import (
     get_incident_df,
@@ -201,6 +207,176 @@ async def data_incident_trend(
         "labels": counts.index.tolist(),
         "series": [{"name": "Count", "data": counts.values.astype(int).tolist()}],
     })
+
+
+@router.get("/data/incident-trend-detailed", response_model=DetailedTrendResponse)
+async def data_incident_trend_detailed(
+    dataset: str = Query("incident", description="Dataset to use: 'incident' or 'hazard'"),
+    start_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
+    end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
+    departments: Optional[List[str]] = Query(None, description="Filter by departments"),
+    locations: Optional[List[str]] = Query(None, description="Filter by locations"),
+    sublocations: Optional[List[str]] = Query(None, description="Filter by sublocations"),
+    min_severity: Optional[float] = Query(None, ge=0, le=5, description="Min severity"),
+    max_severity: Optional[float] = Query(None, ge=0, le=5, description="Max severity"),
+    min_risk: Optional[float] = Query(None, ge=0, le=5, description="Min risk"),
+    max_risk: Optional[float] = Query(None, ge=0, le=5, description="Max risk"),
+    statuses: Optional[List[str]] = Query(None, description="Filter by status"),
+    incident_types: Optional[List[str]] = Query(None, description="Filter by incident types"),
+    violation_types: Optional[List[str]] = Query(None, description="Filter by violation types"),
+):
+    """
+    Enhanced endpoint that returns trend data WITH detailed breakdowns for tooltips.
+    
+    Returns:
+    - labels: Month labels (YYYY-MM format)
+    - series: Chart data (counts per month)
+    - details: Detailed breakdown per month including:
+        - Top departments with counts
+        - Top incident/violation types with counts
+        - Severity and risk statistics
+        - Recent items (up to 5 most recent)
+    
+    Example:
+        GET /analytics/data/incident-trend-detailed?dataset=incident&start_date=2023-01-01
+    """
+    # Load dataset
+    df = get_incident_df() if (dataset or "incident").lower() == "incident" else get_hazard_df()
+    
+    # Apply filters
+    df = apply_analytics_filters(
+        df, 
+        start_date=start_date, 
+        end_date=end_date, 
+        departments=departments,
+        locations=locations, 
+        sublocations=sublocations,
+        min_severity=min_severity, 
+        max_severity=max_severity,
+        min_risk=min_risk, 
+        max_risk=max_risk,
+        statuses=statuses,
+        incident_types=incident_types,
+        violation_types=violation_types,
+    )
+    
+    if df is None or df.empty:
+        return DetailedTrendResponse(labels=[], series=[], details=[])
+    
+    # Resolve column names
+    date_col = _resolve_column(df, ["occurrence_date", "date of occurrence", "date reported", "date entered"]) or df.columns[0]
+    dept_col = _resolve_column(df, ["department", "section"]) or None
+    title_col = _resolve_column(df, ["title", "description", "incident description", "hazard description"]) or None
+    severity_col = _resolve_column(df, ["severity_score", "severity", "actual consequence (incident)"]) or None
+    risk_col = _resolve_column(df, ["risk_score", "risk"]) or None
+    
+    # Type column depends on dataset
+    if (dataset or "incident").lower() == "incident":
+        type_col = _resolve_column(df, ["incident type(s)", "category", "accident type"]) or None
+    else:
+        type_col = _resolve_column(df, ["violation type (hazard)", "violation_type_hazard_id", "category"]) or None
+    
+    # Convert dates to month periods
+    df_copy = df.copy()
+    df_copy['_month'] = _to_month_period(df_copy[date_col])
+    df_copy['_date'] = pd.to_datetime(df_copy[date_col], errors='coerce')
+    
+    # Get overall counts
+    months = df_copy['_month']
+    counts = months.value_counts().sort_index()
+    
+    # Build detailed breakdown for each month
+    details = []
+    for month_label in counts.index:
+        month_df = df_copy[df_copy['_month'] == month_label]
+        total_count = len(month_df)
+        
+        # Top departments
+        departments_list = []
+        if dept_col and dept_col in month_df.columns:
+            dept_counts = month_df[dept_col].astype(str).value_counts().head(5)
+            departments_list = [
+                CountItem(name=str(dept), count=int(count))
+                for dept, count in dept_counts.items()
+            ]
+        
+        # Top types
+        types_list = []
+        if type_col and type_col in month_df.columns:
+            # Handle comma-separated values
+            type_series = month_df[type_col].astype(str).str.split(',').explode().str.strip()
+            type_counts = type_series.value_counts().head(5)
+            types_list = [
+                CountItem(name=str(t), count=int(count))
+                for t, count in type_counts.items()
+                if str(t).lower() not in ['nan', 'none', '']
+            ]
+        
+        # Severity stats
+        severity_stats = None
+        if severity_col and severity_col in month_df.columns:
+            sev_values = pd.to_numeric(month_df[severity_col], errors='coerce').dropna()
+            if len(sev_values) > 0:
+                severity_stats = ScoreStats(
+                    avg=float(sev_values.mean()),
+                    max=float(sev_values.max()),
+                    min=float(sev_values.min())
+                )
+        
+        # Risk stats
+        risk_stats = None
+        if risk_col and risk_col in month_df.columns:
+            risk_values = pd.to_numeric(month_df[risk_col], errors='coerce').dropna()
+            if len(risk_values) > 0:
+                risk_stats = ScoreStats(
+                    avg=float(risk_values.mean()),
+                    max=float(risk_values.max()),
+                    min=float(risk_values.min())
+                )
+        
+        # Recent items (up to 5, sorted by date descending)
+        recent_items_list = []
+        if title_col and title_col in month_df.columns:
+            # Sort by date descending and take top 5
+            month_df_sorted = month_df.sort_values('_date', ascending=False).head(5)
+            
+            for _, row in month_df_sorted.iterrows():
+                title = str(row.get(title_col, "Untitled"))[:100]  # Truncate long titles
+                department = str(row.get(dept_col, "Unknown")) if dept_col else "Unknown"
+                date_val = row.get('_date')
+                date_str = date_val.strftime('%Y-%m-%d') if pd.notna(date_val) else month_label
+                severity_val = None
+                if severity_col and severity_col in row.index:
+                    sev = pd.to_numeric(row.get(severity_col), errors='coerce')
+                    severity_val = float(sev) if pd.notna(sev) else None
+                
+                recent_items_list.append(RecentItem(
+                    title=title,
+                    department=department,
+                    date=date_str,
+                    severity=severity_val
+                ))
+        
+        # Create month detail
+        month_detail = MonthDetailedData(
+            month=str(month_label),
+            total_count=total_count,
+            departments=departments_list,
+            types=types_list,
+            severity=severity_stats,
+            risk=risk_stats,
+            recent_items=recent_items_list
+        )
+        details.append(month_detail)
+    
+    # Build response
+    response = DetailedTrendResponse(
+        labels=counts.index.tolist(),
+        series=[ChartSeries(name="Count", data=counts.values.astype(int).tolist())],
+        details=details
+    )
+    
+    return response
 
 
 @router.get("/data/incident-type-distribution")

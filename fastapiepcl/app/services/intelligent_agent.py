@@ -106,7 +106,7 @@ def conversational_handler_node(state: IntelligentAnalystState) -> Dict:
     """Handle conversational queries with context"""
     response = _generate_conversational_response(
         state["query"],
-        model=state.get("model", "x-ai/grok-4-fast:free")
+        model=state.get("model", "x-ai/grok-code-fast-1")
     )
     
     return {
@@ -195,7 +195,7 @@ def intelligent_code_generator_node(state: IntelligentAnalystState) -> Dict:
     code_response = ask_openai(
         question=state["query"],
         context=enhanced_context,
-        model=state.get("model", "x-ai/grok-4-fast:free"),
+        model=state.get("model", "x-ai/grok-code-fast-1"),
         code_mode=True,
         multi_df=True
     )
@@ -296,7 +296,7 @@ Be specific and actionable.
     reflection = ask_openai(
         question="Provide reflection on this error",
         context=reflection_prompt,
-        model=state.get("model", "x-ai/grok-4-fast:free"),
+        model=state.get("model", "x-ai/grok-code-fast-1"),
         code_mode=False
     )
     
@@ -346,7 +346,7 @@ Provide verification in JSON format:
     verification_response = ask_openai(
         question="Verify this analysis",
         context=verification_prompt,
-        model=state.get("model", "x-ai/grok-4-fast:free"),
+        model=state.get("model", "x-ai/grok-code-fast-1"),
         code_mode=False
     )
     
@@ -477,7 +477,7 @@ Be specific, data-driven, and actionable. Use bullet points.
     analysis = ask_openai(
         question="Generate comprehensive analysis",
         context=analysis_context,
-        model=state.get("model", "x-ai/grok-4-fast:free"),
+        model=state.get("model", "x-ai/grok-code-fast-1"),
         code_mode=False
     )
     
@@ -604,7 +604,7 @@ def create_intelligent_analyst_graph():
 async def run_intelligent_analyst_stream(
     query: str,
     dataset: str = "all",
-    model: str = "x-ai/grok-4-fast:free",
+    model: str = "x-ai/grok-code-fast-1",
     max_iterations: int = 3
 ):
     """

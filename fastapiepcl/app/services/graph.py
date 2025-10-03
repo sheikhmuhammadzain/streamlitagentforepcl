@@ -100,7 +100,7 @@ def conversational_handler_node(state: SafetyCopilotState) -> Dict:
     """Handle conversational queries instantly"""
     response = _generate_conversational_response(
         state["query"],
-        model=state.get("model", "x-ai/grok-4-fast:free")
+        model=state.get("model", "x-ai/grok-code-fast-1")
     )
     
     return {
@@ -151,7 +151,7 @@ def code_generator_node(state: SafetyCopilotState) -> Dict:
     code_response = ask_openai(
         question=state["query"],
         context=enhanced_context,
-        model=state.get("model", "x-ai/grok-4-fast:free"),
+        model=state.get("model", "x-ai/grok-code-fast-1"),
         code_mode=True,
         multi_df=True
     )
@@ -200,7 +200,7 @@ def result_verifier_node(state: SafetyCopilotState) -> Dict:
         code=state["code"],
         result=state.get("execution_result"),
         error=state.get("stderr", ""),
-        model=state.get("model", "x-ai/grok-4-fast:free")
+        model=state.get("model", "x-ai/grok-code-fast-1")
     )
     
     # Record attempt
@@ -267,7 +267,7 @@ def result_finalizer_node(state: SafetyCopilotState) -> Dict:
     analysis = ask_openai(
         question="Provide a concise analysis based on the outputs.",
         context=summary_ctx,
-        model=state.get("model", "x-ai/grok-4-fast:free"),
+        model=state.get("model", "x-ai/grok-code-fast-1"),
         code_mode=False
     )
     
@@ -362,7 +362,7 @@ def create_safety_copilot_graph():
 async def run_safety_copilot_graph_stream(
     query: str,
     dataset: str = "all",
-    model: str = "x-ai/grok-4-fast:free",
+    model: str = "x-ai/grok-code-fast-1",
     max_retries: int = 3
 ):
     """Run Safety Copilot graph with streaming updates
@@ -370,7 +370,7 @@ async def run_safety_copilot_graph_stream(
     Args:
         query: User question to analyze
         dataset: Which dataset to use - "all" loads ALL sheets (default), or specify: incident|hazard|audit|inspection
-        model: LLM model to use (default: x-ai/grok-4-fast:free)
+        model: LLM model to use (default: x-ai/grok-code-fast-1)
         max_retries: Maximum retry attempts for self-correction
     """
     

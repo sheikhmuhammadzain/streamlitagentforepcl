@@ -81,7 +81,7 @@ async def websocket_agent_stream(
             data = await websocket.receive_json()
             question = data.get("question", "")
             dataset = data.get("dataset", "all")
-            model = data.get("model", "x-ai/grok-4-fast:free")
+            model = data.get("model", "x-ai/grok-code-fast-1")
         
         if not question or not question.strip():
             await websocket.send_json({
@@ -197,7 +197,7 @@ async def websocket_interactive_agent(websocket: WebSocket):
             if action == "query":
                 question = data.get("question", "")
                 dataset = data.get("dataset", "all")
-                model = data.get("model", "x-ai/grok-4-fast:free")
+                model = data.get("model", "x-ai/grok-code-fast-1")
                 
                 if not question.strip():
                     await websocket.send_json({

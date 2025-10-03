@@ -27,7 +27,7 @@ from .agent import (
 async def run_ultra_fast_streaming_agent(
     query: str,
     dataset: str = "all",
-    model: str = "x-ai/grok-4-fast:free",
+    model: str = "x-ai/grok-code-fast-1",
     max_retries: int = 3
 ) -> AsyncGenerator[Dict[str, Any], None]:
     """

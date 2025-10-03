@@ -13,7 +13,7 @@ router = APIRouter(prefix="/agent", tags=["agent"])
 async def run_agent(
     question: str = Query(..., description="User question to analyze using pandas code + LLM"),
     dataset: str = Query("all", description="Which dataset to use: all (default - loads ALL sheets)|incident|hazard|audit|inspection"),
-    model: str = Query("x-ai/grok-4-fast:free", description="LLM model for code-gen and summary"),
+    model: str = Query("x-ai/grok-code-fast-1", description="LLM model for code-gen and summary"),
 ):
     if not question.strip():
         raise HTTPException(status_code=400, detail="Parameter 'question' is required")
@@ -25,7 +25,7 @@ async def run_agent(
 async def run_agent_stream(
     question: str = Query(..., description="User question to analyze using pandas code + LLM"),
     dataset: str = Query("all", description="Which dataset to use: all (default - loads ALL sheets)|incident|hazard|audit|inspection"),
-    model: str = Query("x-ai/grok-4-fast:free", description="LLM model for streaming (default: FREE Grok via OpenRouter)"),
+    model: str = Query("x-ai/grok-code-fast-1", description="LLM model for streaming (default: FREE Grok via OpenRouter)"),
 ):
     """
     Streaming version of the agent that shows real-time progress.

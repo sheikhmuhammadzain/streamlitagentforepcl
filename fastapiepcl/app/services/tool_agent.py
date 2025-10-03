@@ -532,7 +532,7 @@ TOOL_FUNCTIONS = {
 
 async def run_tool_based_agent(
     query: str,
-    model: str = "x-ai/grok-4-fast:free",  # Free model with function calling
+    model: str = "x-ai/grok-code-fast-1",  # Free model with function calling
     max_iterations: int = 100
 ) -> AsyncGenerator[Dict[str, Any], None]:
     """
