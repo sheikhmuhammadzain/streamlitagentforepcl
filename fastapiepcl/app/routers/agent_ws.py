@@ -17,6 +17,7 @@ router = APIRouter(prefix="/ws", tags=["websocket"])
 
 @router.websocket("/agent/stream")
 async def websocket_agent_stream(
+    websocket: WebSocket,
     question: Optional[str] = Query(None),
     dataset: Optional[str] = Query("all"),
     model: Optional[str] = Query("google/gemini-flash-1.5:free")
