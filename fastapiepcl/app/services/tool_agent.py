@@ -356,6 +356,225 @@ def compare_sheets(sheet1: str, sheet2: str, comparison_type: str = "count") -> 
         return json.dumps({"error": str(e)})
 
 
+def get_top_values(sheet_name: str, column_name: str, limit: int = 10) -> str:
+    """
+    Get the top N most common values in a column
+    
+    Args:
+        sheet_name: Name of the sheet
+        column_name: Column to analyze
+        limit: Number of top values to return (default 10)
+    
+    Returns:
+        JSON string with top values and their counts
+    """
+    try:
+        # OPTIMIZATION: Check cache
+        cache_key = f"top_{sheet_name}_{column_name}_{limit}"
+        cached_result = get_cached_query(cache_key)
+        if cached_result:
+            return cached_result
+        
+        # OPTIMIZATION: Use cached workbook
+        workbook = get_cached_workbook()
+        if workbook is None:
+            workbook = load_default_sheets()
+            if workbook:
+                cache_workbook(workbook)
+        
+        dfs = {str(k).lower(): v for k, v in (workbook or {}).items()}
+        
+        if sheet_name.lower() not in dfs:
+            return json.dumps({"error": f"Sheet '{sheet_name}' not found"})
+        
+        df = dfs[sheet_name.lower()]
+        
+        if column_name not in df.columns:
+            return json.dumps({"error": f"Column '{column_name}' not found. Available: {list(df.columns)}"})
+        
+        # Get value counts
+        value_counts = df[column_name].value_counts().head(limit)
+        
+        # Convert to list of dicts for better readability
+        results = [
+            {"value": _stringify_key(val), "count": int(count)}
+            for val, count in value_counts.items()
+        ]
+        
+        payload = {
+            "column": column_name,
+            "total_unique_values": int(df[column_name].nunique()),
+            "total_rows": len(df),
+            "top_values": results
+        }
+        
+        result = json.dumps(_to_jsonable(payload), indent=2)
+        
+        # Cache the result
+        cache_query(cache_key, result)
+        return result
+        
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+
+def get_trend(sheet_name: str, date_column: str, value_column: str = "", period: str = "month") -> str:
+    """
+    Analyze trends over time
+    
+    Args:
+        sheet_name: Name of the sheet
+        date_column: Column containing dates
+        value_column: Column to aggregate (optional, will count if not provided)
+        period: Time period for grouping (day, week, month, quarter, year)
+    
+    Returns:
+        JSON string with trend data
+    """
+    try:
+        # OPTIMIZATION: Check cache
+        cache_key = f"trend_{sheet_name}_{date_column}_{value_column}_{period}"
+        cached_result = get_cached_query(cache_key)
+        if cached_result:
+            return cached_result
+        
+        # OPTIMIZATION: Use cached workbook
+        workbook = get_cached_workbook()
+        if workbook is None:
+            workbook = load_default_sheets()
+            if workbook:
+                cache_workbook(workbook)
+        
+        dfs = {str(k).lower(): v for k, v in (workbook or {}).items()}
+        
+        if sheet_name.lower() not in dfs:
+            return json.dumps({"error": f"Sheet '{sheet_name}' not found"})
+        
+        df = dfs[sheet_name.lower()]
+        
+        if date_column not in df.columns:
+            return json.dumps({"error": f"Column '{date_column}' not found. Available: {list(df.columns)}"})
+        
+        # Convert to datetime
+        df_copy = df.copy()
+        df_copy[date_column] = pd.to_datetime(df_copy[date_column], errors='coerce')
+        df_copy = df_copy.dropna(subset=[date_column])
+        
+        # Group by period
+        period_map = {
+            "day": "D",
+            "week": "W",
+            "month": "M",
+            "quarter": "Q",
+            "year": "Y"
+        }
+        
+        freq = period_map.get(period.lower(), "M")
+        df_copy['period'] = df_copy[date_column].dt.to_period(freq)
+        
+        # Aggregate
+        if value_column and value_column in df_copy.columns:
+            trend_data = df_copy.groupby('period')[value_column].sum().sort_index()
+            metric = "sum"
+        else:
+            trend_data = df_copy.groupby('period').size().sort_index()
+            metric = "count"
+        
+        # Convert to list format
+        results = [
+            {"period": str(period), "value": float(value) if pd.notna(value) else 0}
+            for period, value in trend_data.items()
+        ]
+        
+        payload = {
+            "date_column": date_column,
+            "value_column": value_column or "count",
+            "period": period,
+            "metric": metric,
+            "trend_data": results,
+            "total_periods": len(results)
+        }
+        
+        result = json.dumps(_to_jsonable(payload), indent=2)
+        
+        # Cache the result
+        cache_query(cache_key, result)
+        return result
+        
+    except Exception as e:
+        import traceback
+        return json.dumps({"error": str(e), "traceback": traceback.format_exc()})
+
+
+def filter_data(sheet_name: str, filter_column: str, filter_value: str, return_columns: str = "") -> str:
+    """
+    Filter data based on column value
+    
+    Args:
+        sheet_name: Name of the sheet
+        filter_column: Column to filter by
+        filter_value: Value or pattern to match (supports partial matching)
+        return_columns: Comma-separated list of columns to return (optional, returns all if empty)
+    
+    Returns:
+        JSON string with filtered data
+    """
+    try:
+        # OPTIMIZATION: Check cache
+        cache_key = f"filter_{sheet_name}_{filter_column}_{filter_value}_{return_columns}"
+        cached_result = get_cached_query(cache_key)
+        if cached_result:
+            return cached_result
+        
+        # OPTIMIZATION: Use cached workbook
+        workbook = get_cached_workbook()
+        if workbook is None:
+            workbook = load_default_sheets()
+            if workbook:
+                cache_workbook(workbook)
+        
+        dfs = {str(k).lower(): v for k, v in (workbook or {}).items()}
+        
+        if sheet_name.lower() not in dfs:
+            return json.dumps({"error": f"Sheet '{sheet_name}' not found"})
+        
+        df = dfs[sheet_name.lower()]
+        
+        if filter_column not in df.columns:
+            return json.dumps({"error": f"Column '{filter_column}' not found. Available: {list(df.columns)}"})
+        
+        # Apply filter (case-insensitive partial match)
+        mask = df[filter_column].astype(str).str.contains(str(filter_value), case=False, na=False)
+        filtered_df = df[mask]
+        
+        # Select columns if specified
+        if return_columns:
+            cols = [c.strip() for c in return_columns.split(',')]
+            available_cols = [c for c in cols if c in filtered_df.columns]
+            if available_cols:
+                filtered_df = filtered_df[available_cols]
+        
+        # Limit to 100 rows for performance
+        filtered_df = filtered_df.head(100)
+        
+        payload = {
+            "filter_column": filter_column,
+            "filter_value": filter_value,
+            "matched_rows": len(filtered_df),
+            "total_rows": len(df),
+            "data": filtered_df.to_dict('records')
+        }
+        
+        result = json.dumps(_to_jsonable(payload), indent=2)
+        
+        # Cache the result
+        cache_query(cache_key, result)
+        return result
+        
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+
 def create_chart(
     sheet_name: str, 
     chart_type: str, 
@@ -621,6 +840,92 @@ TOOLS = [
                 "required": ["sheet_name", "chart_type", "x_column"]
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_top_values",
+            "description": "Get the top N most common values in a column. Perfect for finding most frequent categories, departments, or types.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "sheet_name": {
+                        "type": "string",
+                        "description": "Name of the dataset"
+                    },
+                    "column_name": {
+                        "type": "string",
+                        "description": "Column to analyze (e.g., 'department', 'violation_type_hazard_id', 'location')"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Number of top values to return (default 10)",
+                        "default": 10
+                    }
+                },
+                "required": ["sheet_name", "column_name"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_trend",
+            "description": "Analyze trends over time. Shows how values change across days, weeks, months, quarters, or years.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "sheet_name": {
+                        "type": "string",
+                        "description": "Name of the dataset"
+                    },
+                    "date_column": {
+                        "type": "string",
+                        "description": "Column containing dates (e.g., 'occurrence_date', 'start_date')"
+                    },
+                    "value_column": {
+                        "type": "string",
+                        "description": "Column to aggregate (optional, will count records if not provided)"
+                    },
+                    "period": {
+                        "type": "string",
+                        "enum": ["day", "week", "month", "quarter", "year"],
+                        "description": "Time period for grouping (default: month)",
+                        "default": "month"
+                    }
+                },
+                "required": ["sheet_name", "date_column"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "filter_data",
+            "description": "Filter data based on column value with partial matching. Returns matching records.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "sheet_name": {
+                        "type": "string",
+                        "description": "Name of the dataset"
+                    },
+                    "filter_column": {
+                        "type": "string",
+                        "description": "Column to filter by (e.g., 'department', 'status', 'location')"
+                    },
+                    "filter_value": {
+                        "type": "string",
+                        "description": "Value or pattern to match (case-insensitive, supports partial matching)"
+                    },
+                    "return_columns": {
+                        "type": "string",
+                        "description": "Comma-separated list of columns to return (optional, returns all if empty)"
+                    }
+                },
+                "required": ["sheet_name", "filter_column", "filter_value"]
+            }
+        }
     }
 ]
 
@@ -631,6 +936,9 @@ TOOL_FUNCTIONS = {
     "query_data": query_data,
     "aggregate_data": aggregate_data,
     "compare_sheets": compare_sheets,
+    "get_top_values": get_top_values,
+    "get_trend": get_trend,
+    "filter_data": filter_data,
     "create_chart": create_chart
 }
 
@@ -638,30 +946,13 @@ TOOL_FUNCTIONS = {
 
 def enhance_response_formatting(response: str) -> str:
     """
-    Enhance response formatting to ensure it's well-structured
-    Adds missing sections and improves readability
+    Clean and normalize response formatting without forcing structure.
+    Removes excessive formatting that causes rendering issues.
     """
     
-    # Check if response already has proper formatting
-    has_sections = any(marker in response for marker in ["## 📊", "## 💡", "## 📈", "## 📋"])
-    
-    if has_sections:
-        # Already formatted, just ensure consistency
-        return response
-    
-    # If not formatted, add basic structure
-    lines = response.split('\n')
-    
-    # Try to identify different parts
-    formatted = "## 📊 Analysis Results\n\n"
-    formatted += response
-    
-    # Add a summary section if not present
-    if "summary" not in response.lower() and "## 📋" not in response:
-        formatted += "\n\n## 📋 Summary\n"
-        formatted += "Analysis completed successfully. See findings above for detailed insights."
-    
-    return formatted
+    # Just return the response as-is - let frontend handle markdown rendering
+    # This prevents double-escaping and literal markdown display issues
+    return response.strip()
 
 
 # ==================== Connection Pool ====================
@@ -745,47 +1036,75 @@ async def run_tool_based_agent(
     available_keys = set(available_sheets)
 
     # System prompt with runtime sheet list
-    system_prompt = f"""You are an expert data analyst with access to safety management data.
+    system_prompt = f"""You are a workplace safety advisor and data storyteller with access to safety management data.
 
 Available datasets (use EXACT names from this list in tool calls):
 {available_sheets}
 
-Instructions:
-- Always pick sheet names from the list above. If the user mentions an alias (e.g., 'hazard'), map it to the closest available name (e.g., 'hazard id') and use that exact name in tool calls.
-- Before deep analysis, use get_data_summary to confirm structure if unsure.
-- Use tools to query/aggregate data; then synthesize concise insights with exact numbers.
+Your role:
+1. Analyze user questions about safety data
+2. Use the appropriate tools to get data
+3. Tell a compelling story with the data - explain what's happening, why it matters, and what to do about it
+4. Provide prescriptive analysis with actionable recommendations in a human, conversational way
 
-RESPONSE FORMATTING REQUIREMENTS:
-When providing your final answer, format it using Markdown with the following structure:
+Communication Style - STORYTELLING APPROACH:
+- Start with "what the data is telling us" in simple, relatable terms
+- Build a narrative: What happened → Why it matters → What to do next
+- Use analogies and real-world examples to explain complex patterns
+- Speak like you're advising a colleague, not writing a technical report
+- Make insights feel personal and urgent when safety is at risk
 
-## 📊 Key Findings
-- List the most important data points with **exact numbers**
-- Highlight trends and patterns discovered
-- Use bullet points for clarity
+Guidelines:
+- Use tools to get actual data (don't make assumptions)
+- For trends, use time-based analysis
+- For comparisons, use compare_sheets or aggregation
+- Always cite specific numbers from the data
+- Explain numbers in context (e.g., "864 incidents - that's almost 3 per day")
+- Connect data to real safety outcomes and human impact
 
-## 💡 Insights
-- Explain what the data means
-- Identify root causes or contributing factors
-- Connect findings to business impact
+Available tools:
+- get_data_summary: Get summary statistics and schema information for a dataset
+- query_data: Query data based on natural language description to find specific records or patterns
+- aggregate_data: Group data and apply operations (count, sum, mean, max, min)
+- compare_sheets: Compare data between two datasets
+- get_top_values: Get the top N most common values in a column
+- get_trend: Analyze trends over time (day, week, month, quarter, year)
+- filter_data: Filter data based on column value with partial matching
+- create_chart: Create visualizations (bar, line, pie, scatter) with optional filtering
 
-## 📈 Recommendations
-- Provide actionable next steps (prioritized)
-- Suggest areas requiring attention
-- Include specific, data-driven suggestions
+IMPORTANT: 
+- Use EXACT sheet names from the available list above
+- Call tools with proper parameters
+- Synthesize insights from tool results
+- Keep formatting minimal and clean for better readability
 
-## 📋 Summary
-- Brief overview of the analysis
-- Key metrics in a concise format
-- Use tables or lists for structured data
+Response Structure (tell a story):
+1. **What's Happening** (Key Findings)
+   - Present the data in layman terms
+   - Use relatable comparisons (e.g., "3x higher than last quarter")
+   
+2. **Why It Matters** (Insights & Analysis)
+   - Explain the root causes in simple language
+   - Connect to safety outcomes and business impact
+   - Highlight risks and opportunities
+   
+3. **What To Do About It** (Prescriptive Recommendations)
+   - Provide specific, actionable steps (prioritized)
+   - Suggest preventive measures
+   - Include quick wins and long-term strategies
+   - Make recommendations feel urgent but achievable
 
-FORMATTING RULES:
-✅ Use **bold** for important numbers and metrics
-✅ Use bullet points (•) for lists
-✅ Use emojis for visual clarity (📊 📈 💡 ⚠️ ✅)
-✅ Include exact numbers from tool results
-✅ Format tables using Markdown table syntax when showing multiple data points
-✅ Keep paragraphs short and scannable
-✅ Use headings (##) to organize sections
+4. **The Bottom Line** (Summary)
+   - One-sentence takeaway
+   - Key metric to watch
+
+Formatting Guidelines:
+- Use headings: ## What's Happening, ## Why It Matters, ## What To Do
+- Use bullet points (-) for lists
+- Minimal bold/italic - only for critical emphasis
+- Include data tables when comparing multiple items
+- Keep paragraphs short (2-3 sentences max)
+- Use conversational language, avoid jargon
 """
     
     messages = [
@@ -813,7 +1132,7 @@ FORMATTING RULES:
                 tools=TOOLS,
                 tool_choice="auto",
                 temperature=0.1,  # Low temp for consistency
-                max_tokens=12000,
+                max_tokens=20000,
                 stream=True,  # Enable streaming
                 extra_headers={
                     "HTTP-Referer": "http://localhost:8000",
@@ -826,25 +1145,14 @@ FORMATTING RULES:
             content_buffer = ""
             tool_calls_buffer = {}
             token_count = 0
+            has_tool_calls = False
             
             async for chunk in stream:
                 delta = chunk.choices[0].delta
                 
-                # OPTIMIZATION: Batch content tokens (every 10 tokens)
-                if delta.content:
-                    content_buffer += delta.content
-                    token_count += 1
-                    
-                    # Stream in batches of 10 tokens for efficiency
-                    if token_count >= 10:
-                        yield {
-                            "type": "thinking_token",
-                            "token": content_buffer[-len(delta.content) * 10:]
-                        }
-                        token_count = 0
-                
                 # Collect tool calls (don't stream partial args - reduces overhead)
                 if delta.tool_calls:
+                    has_tool_calls = True
                     for tc in delta.tool_calls:
                         idx = tc.index
                         if idx not in tool_calls_buffer:
@@ -859,6 +1167,23 @@ FORMATTING RULES:
                         
                         if tc.function.arguments:
                             tool_calls_buffer[idx]["function"]["arguments"] += tc.function.arguments
+                
+                # OPTIMIZATION: Batch content tokens (every 10 tokens)
+                # BUT: Don't stream content if tool calls are present (prevents duplicate responses)
+                if delta.content and not has_tool_calls:
+                    content_buffer += delta.content
+                    token_count += 1
+                    
+                    # Stream in batches of 10 tokens for efficiency
+                    if token_count >= 10:
+                        yield {
+                            "type": "thinking_token",
+                            "token": content_buffer[-len(delta.content) * 10:]
+                        }
+                        token_count = 0
+                elif delta.content:
+                    # Still collect content even if tool calls present (for message history)
+                    content_buffer += delta.content
                 
                 # Get finish reason
                 if chunk.choices[0].finish_reason:
