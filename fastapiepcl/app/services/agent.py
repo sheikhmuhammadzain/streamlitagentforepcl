@@ -35,22 +35,22 @@ def _normalize_openrouter_model(model: str) -> str:
     Returns a safe default if input is empty or deprecated.
 
     Known Grok models on OpenRouter include:
-    - x-ai/grok-code-fast-1 (FREE - recommended for development)
+    - z-ai/glm-4.6 (FREE - recommended for development)
     - x-ai/grok-2-latest
     - x-ai/grok-2-1212
     - x-ai/grok-2-vision-1212
 
     Deprecated/invalid examples that we remap:
-    - x-ai/grok-beta -> x-ai/grok-code-fast-1
+    - x-ai/grok-beta -> z-ai/glm-4.6
     """
     if not model:
-        return "x-ai/grok-code-fast-1"
+        return "z-ai/glm-4.6"
     m = model.strip().lower()
     aliases = {
-        "grok": "x-ai/grok-code-fast-1",
-        "x-ai/grok": "x-ai/grok-code-fast-1",
-        "x-ai/grok-beta": "x-ai/grok-code-fast-1",
-        "x-ai/grok-latest": "x-ai/grok-code-fast-1",
+        "grok": "z-ai/glm-4.6",
+        "x-ai/grok": "z-ai/glm-4.6",
+        "x-ai/grok-beta": "z-ai/glm-4.6",
+        "x-ai/grok-latest": "z-ai/glm-4.6",
     }
     return aliases.get(m, model)
 
@@ -58,18 +58,18 @@ def _normalize_openrouter_model(model: str) -> str:
 def _openrouter_fallback_models(primary: str) -> list[str]:
     """Order of fallback models to try on OpenRouter if a model is invalid/unavailable.
     
-    OPTIMIZED: If primary is x-ai/grok-code-fast-1, return ONLY that model for speed.
+    OPTIMIZED: If primary is z-ai/glm-4.6, return ONLY that model for speed.
     """
     normalized = _normalize_openrouter_model(primary)
     
     # Fast path: if requesting the working model, use ONLY it
-    if normalized == "x-ai/grok-code-fast-1":
-        return ["x-ai/grok-code-fast-1"]
+    if normalized == "z-ai/glm-4.6":
+        return ["z-ai/glm-4.6"]
     
     # Fallback path: try multiple models
     fallbacks = [
         normalized,
-        "x-ai/grok-code-fast-1",  # Primary free Grok
+        "z-ai/glm-4.6",  # Primary free Grok
         "x-ai/grok-2-latest",
         "x-ai/grok-2-1212",
         # Other free fallbacks
@@ -169,7 +169,7 @@ def _is_conversational_query(query: str) -> bool:
     return False
 
 
-def _generate_conversational_response(query: str, model: str = "x-ai/grok-code-fast-1") -> str:
+def _generate_conversational_response(query: str, model: str = "z-ai/glm-4.6") -> str:
     """Generate a conversational response for meta/greeting queries."""
     conversational_context = """
 You are Safety Copilot, an intelligent data analysis agent built by Qbit.
@@ -946,7 +946,7 @@ def generate_corrected_code(query: str, context: str, previous_attempts: List[Di
     return ask_openai(query, enhanced_context, model=model, code_mode=True, multi_df=True)
 
 
-async def ask_openai_stream(question: str, context: str, *, model: str = "x-ai/grok-code-fast-1", code_mode: bool = False, multi_df: bool = False) -> AsyncGenerator[str, None]:
+async def ask_openai_stream(question: str, context: str, *, model: str = "z-ai/glm-4.6", code_mode: bool = False, multi_df: bool = False) -> AsyncGenerator[str, None]:
     """Streaming version of ask_openai for real-time updates."""
     if not _OPENAI_AVAILABLE:
         yield "OpenAI Python package is not installed."
@@ -1062,7 +1062,7 @@ async def ask_openai_stream(question: str, context: str, *, model: str = "x-ai/g
         yield f"\n\nError: {str(e)}"
 
 
-async def generate_agent_response_stream(query: str, *, dataset: str = "incident", model: str = "x-ai/grok-code-fast-1", max_retries: int = 3) -> AsyncGenerator[Dict[str, Any], None]:
+async def generate_agent_response_stream(query: str, *, dataset: str = "incident", model: str = "z-ai/glm-4.6", max_retries: int = 3) -> AsyncGenerator[Dict[str, Any], None]:
     """
     Streaming version of generate_agent_response.
     Yields progress updates in real-time.

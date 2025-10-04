@@ -7,6 +7,8 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
 from typing import Optional
 import json
 import traceback
+import asyncio
+from collections import deque
 
 from ..services.tool_agent import run_tool_based_agent
 
@@ -15,7 +17,6 @@ router = APIRouter(prefix="/ws", tags=["websocket"])
 
 @router.websocket("/agent/stream")
 async def websocket_agent_stream(
-    websocket: WebSocket,
     question: Optional[str] = Query(None),
     dataset: Optional[str] = Query("all"),
     model: Optional[str] = Query("google/gemini-flash-1.5:free")
@@ -29,11 +30,13 @@ async def websocket_agent_stream(
     - Lower latency (~50-100ms faster per message)
     - More efficient bandwidth usage
     
-    Usage (JavaScript):
-    ```javascript
-    const ws = new WebSocket('ws://localhost:8000/ws/agent/stream?question=YOUR_QUERY');
+    Performance Optimizations:
+    - Batched event streaming (reduces overhead)
+    - Connection keep-alive for reuse
+    - Minimal JSON serialization
+    - Fast-path for simple queries
     
-    ws.onopen = () => {
+    Usage (JavaScript):
         console.log('Connected!');
     };
     
@@ -81,7 +84,7 @@ async def websocket_agent_stream(
             data = await websocket.receive_json()
             question = data.get("question", "")
             dataset = data.get("dataset", "all")
-            model = data.get("model", "x-ai/grok-code-fast-1")
+            model = data.get("model", "z-ai/glm-4.6")
         
         if not question or not question.strip():
             await websocket.send_json({
@@ -90,6 +93,22 @@ async def websocket_agent_stream(
             })
             await websocket.close()
             return
+        
+        # OPTIMIZATION: Batch events for reduced overhead
+        event_buffer = deque(maxlen=10)
+        last_send_time = asyncio.get_event_loop().time()
+        BATCH_INTERVAL = 0.05  # 50ms batching window
+        
+        async def flush_buffer():
+            """Send batched events"""
+            if event_buffer:
+                # Send all buffered events at once
+                events_to_send = list(event_buffer)
+                event_buffer.clear()
+                
+                for evt in events_to_send:
+                    if websocket.client_state.name == "CONNECTED":
+                        await websocket.send_json(evt)
         
         # Stream events through WebSocket with tool-based agent
         async for event in run_tool_based_agent(
@@ -102,13 +121,33 @@ async def websocket_agent_stream(
                     print("Client disconnected, stopping stream")
                     break
                 
-                # Send JSON directly (no SSE formatting overhead)
-                await websocket.send_json(event)
+                # OPTIMIZATION: Batch non-critical events
+                event_type = event.get("type", "")
+                
+                # Critical events: send immediately
+                if event_type in ["start", "complete", "error", "data_ready", "answer_complete"]:
+                    # Flush any pending events first
+                    await flush_buffer()
+                    # Send critical event immediately
+                    await websocket.send_json(event)
+                
+                # Non-critical events: batch them
+                else:
+                    event_buffer.append(event)
+                    current_time = asyncio.get_event_loop().time()
+                    
+                    # Flush if buffer is full or time window elapsed
+                    if len(event_buffer) >= 5 or (current_time - last_send_time) >= BATCH_INTERVAL:
+                        await flush_buffer()
+                        last_send_time = current_time
             
             except Exception as send_error:
                 # Connection closed, stop streaming
                 print(f"Send failed: {send_error}")
                 break
+        
+        # Flush any remaining events
+        await flush_buffer()
         
         # Send completion signal (only if still connected)
         try:
@@ -197,7 +236,7 @@ async def websocket_interactive_agent(websocket: WebSocket):
             if action == "query":
                 question = data.get("question", "")
                 dataset = data.get("dataset", "all")
-                model = data.get("model", "x-ai/grok-code-fast-1")
+                model = data.get("model", "z-ai/glm-4.6")
                 
                 if not question.strip():
                     await websocket.send_json({

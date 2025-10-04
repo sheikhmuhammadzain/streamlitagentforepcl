@@ -99,7 +99,7 @@ Change model in `test_websocket.html` line 320:
 
 ```javascript
 // Grok (good for complex reasoning, but rate limited)
-&model=x-ai/grok-code-fast-1
+&model=z-ai/glm-4.6
 
 // Gemini (most stable, recommended)
 &model=google/gemini-flash-1.5:free

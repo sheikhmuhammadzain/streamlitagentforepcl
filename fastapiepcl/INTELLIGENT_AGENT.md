@@ -227,7 +227,7 @@ GET /agent/stream
 ### **Parameters:**
 - `question` (required) - Your query
 - `dataset` (default: "all") - Which sheets to prioritize
-- `model` (default: "x-ai/grok-code-fast-1") - LLM model
+- `model` (default: "z-ai/glm-4.6") - LLM model
 
 ### **Examples:**
 
@@ -491,7 +491,7 @@ OPENROUTER_SITE_NAME=Safety Copilot
 ```
 
 ### **Default Settings:**
-- **Model:** `x-ai/grok-code-fast-1` (FREE)
+- **Model:** `z-ai/glm-4.6` (FREE)
 - **Dataset:** `all` (ALL sheets)
 - **Max Iterations:** `3` (self-correction attempts)
 - **Confidence Threshold:** `0.8` (for finalization)
@@ -777,6 +777,6 @@ Your **Intelligent Data Analyst Agent** now features:
 ✅ **Self-correction** - Iterative improvement  
 ✅ **Cross-sheet analysis** - Intelligent joins  
 ✅ **Comprehensive insights** - Findings/Recommendations/Limitations  
-✅ **FREE Grok model** - x-ai/grok-code-fast-1  
+✅ **FREE Grok model** - z-ai/glm-4.6  
 
 **Production-ready intelligent analyst powered by LangGraph!** 🚀✨

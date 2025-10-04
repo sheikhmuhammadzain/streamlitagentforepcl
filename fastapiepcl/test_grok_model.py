@@ -1,5 +1,5 @@
 """
-Simple test script to verify x-ai/grok-code-fast-1 model works with OpenRouter
+Simple test script to verify z-ai/glm-4.6 model works with OpenRouter
 """
 import os
 from openai import OpenAI
@@ -52,7 +52,7 @@ def test_grok_model():
     
     # Test models to try
     models_to_test = [
-        "x-ai/grok-code-fast-1",
+        "z-ai/glm-4.6",
         "google/gemini-2.5-flash:free",
     ]
     
@@ -130,11 +130,11 @@ def test_streaming():
             base_url="https://openrouter.ai/api/v1"
         )
         
-        print("\n📡 Streaming response from x-ai/grok-code-fast-1...")
+        print("\n📡 Streaming response from z-ai/glm-4.6...")
         print("─" * 60)
         
         stream = client.chat.completions.create(
-            model="x-ai/grok-code-fast-1",
+            model="z-ai/glm-4.6",
             messages=[
                 {
                     "role": "user",
