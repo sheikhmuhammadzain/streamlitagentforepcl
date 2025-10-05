@@ -16,6 +16,7 @@ import os
 import hashlib
 import asyncio
 import re
+import httpx
 from openai import AsyncOpenAI
 
 from .agent import load_default_sheets
@@ -25,6 +26,138 @@ from .data_cache import (
     get_cached_query,
     cache_query
 )
+
+
+# ==================== Web Search Tool ====================
+
+SERPER_API_KEY = "1a7343c2485b3e95dde021b5bb0b24296f6ce659"
+
+async def search_web(query: str, num_results: int = 5) -> str:
+    """
+    Search the web for safety standards, best practices, and solutions
+    
+    Args:
+        query: Search query (e.g., 'OSHA fall protection standards', 'workplace hazard prevention')
+        num_results: Number of results to return (default 5, max 10)
+    
+    Returns:
+        JSON string with search results including titles, links, and snippets
+    """
+    try:
+        url = "https://google.serper.dev/search"
+        
+        payload = json.dumps({
+            "q": query,
+            "num": min(num_results, 10)
+        })
+        
+        headers = {
+            'X-API-KEY': SERPER_API_KEY,
+            'Content-Type': 'application/json'
+        }
+        
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(url, headers=headers, content=payload)
+            response.raise_for_status()
+            data = response.json()
+        
+        # Extract organic results with images
+        results = []
+        for item in data.get('organic', [])[:num_results]:
+            results.append({
+                "title": item.get('title', ''),
+                "link": item.get('link', ''),
+                "snippet": item.get('snippet', ''),
+                "position": item.get('position', 0),
+                "thumbnail": item.get('thumbnail', None)  # Image thumbnail if available
+            })
+        
+        # Extract knowledge graph if available (with image)
+        knowledge_graph = None
+        if 'knowledgeGraph' in data:
+            kg = data['knowledgeGraph']
+            knowledge_graph = {
+                "title": kg.get('title', ''),
+                "type": kg.get('type', ''),
+                "description": kg.get('description', ''),
+                "imageUrl": kg.get('imageUrl', None)  # Knowledge graph image
+            }
+        
+        payload = {
+            "query": query,
+            "results_count": len(results),
+            "results": results,
+            "knowledge_graph": knowledge_graph,
+            "search_metadata": {
+                "total_results": data.get('searchInformation', {}).get('totalResults', 0)
+            }
+        }
+        
+        return json.dumps(payload, indent=2)
+        
+    except httpx.HTTPError as e:
+        return json.dumps({"error": f"HTTP error: {str(e)}"})
+    except Exception as e:
+        return json.dumps({"error": f"Search failed: {str(e)}"})
+
+
+async def search_images(query: str, num_results: int = 10) -> str:
+    """
+    Search for images related to safety topics
+    
+    Args:
+        query: Image search query (e.g., 'workplace hazard signs', 'PPE equipment', 'safety infographics')
+        num_results: Number of images to return (default 10, max 10)
+    
+    Returns:
+        JSON string with image URLs, thumbnails, dimensions, and sources
+    """
+    try:
+        url = "https://google.serper.dev/images"
+        
+        payload = json.dumps({
+            "q": query,
+            "num": min(num_results, 10)
+        })
+        
+        headers = {
+            'X-API-KEY': SERPER_API_KEY,
+            'Content-Type': 'application/json'
+        }
+        
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(url, headers=headers, content=payload)
+            response.raise_for_status()
+            data = response.json()
+        
+        # Extract image results
+        images = []
+        for item in data.get('images', [])[:num_results]:
+            images.append({
+                "title": item.get('title', ''),
+                "imageUrl": item.get('imageUrl', ''),
+                "thumbnailUrl": item.get('thumbnailUrl', ''),
+                "source": item.get('source', ''),
+                "link": item.get('link', ''),
+                "width": item.get('imageWidth', 0),
+                "height": item.get('imageHeight', 0)
+            })
+        
+        payload = {
+            "query": query,
+            "images_count": len(images),
+            "images": images,
+            "search_metadata": {
+                "total_results": data.get('searchInformation', {}).get('totalResults', 0)
+            }
+        }
+        
+        return json.dumps(payload, indent=2)
+        
+    except httpx.HTTPError as e:
+        return json.dumps({"error": f"HTTP error: {str(e)}"})
+    except Exception as e:
+        return json.dumps({"error": f"Image search failed: {str(e)}"})
 
 
 # ==================== Data Analysis Tools ====================
@@ -926,6 +1059,50 @@ TOOLS = [
                 "required": ["sheet_name", "filter_column", "filter_value"]
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_web",
+            "description": "Search the web for safety standards, best practices, regulations, and solutions. Use this to find OSHA standards, industry guidelines, safety protocols, or expert recommendations. Perfect for providing authoritative sources and compliance information. Results may include thumbnail images.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search query focused on safety standards, regulations, or best practices. Examples: 'OSHA fall protection standards', 'workplace chemical hazard prevention', 'confined space safety requirements'"
+                    },
+                    "num_results": {
+                        "type": "integer",
+                        "description": "Number of results to return (default 5, max 10)",
+                        "default": 5
+                    }
+                },
+                "required": ["query"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_images",
+            "description": "Search for images related to safety topics. Use this to find visual examples of hazards, safety equipment, signage, infographics, or diagrams. Perfect for visual references in safety training or documentation.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Image search query. Examples: 'workplace hazard signs', 'PPE safety equipment', 'confined space entry diagram', 'safety infographic', 'OSHA poster'"
+                    },
+                    "num_results": {
+                        "type": "integer",
+                        "description": "Number of images to return (default 10, max 10)",
+                        "default": 10
+                    }
+                },
+                "required": ["query"]
+            }
+        }
     }
 ]
 
@@ -939,7 +1116,9 @@ TOOL_FUNCTIONS = {
     "get_top_values": get_top_values,
     "get_trend": get_trend,
     "filter_data": filter_data,
-    "create_chart": create_chart
+    "create_chart": create_chart,
+    "search_web": search_web,
+    "search_images": search_images
 }
 
 # ==================== Response Formatting ====================
@@ -1036,7 +1215,7 @@ async def run_tool_based_agent(
     available_keys = set(available_sheets)
 
     # System prompt with runtime sheet list
-    system_prompt = f"""You are a workplace safety advisor and data storyteller with access to safety management data.
+    system_prompt = f"""You are a workplace safety advisor and data storyteller with access to safety management data.Your name is Saftey Copilot built by Qbit Dynamics
 
 Available datasets (use EXACT names from this list in tool calls):
 {available_sheets}
@@ -1071,6 +1250,8 @@ Available tools:
 - get_trend: Analyze trends over time (day, week, month, quarter, year)
 - filter_data: Filter data based on column value with partial matching
 - create_chart: Create visualizations (bar, line, pie, scatter) with optional filtering
+- search_web: Search for safety standards, OSHA regulations, best practices, and expert recommendations (includes thumbnails)
+- search_images: Search for safety-related images (hazard signs, PPE, diagrams, infographics)
 
 IMPORTANT: 
 - Use EXACT sheet names from the available list above
@@ -1090,9 +1271,11 @@ Response Structure (tell a story):
    
 3. **What To Do About It** (Prescriptive Recommendations)
    - Provide specific, actionable steps (prioritized)
-   - Suggest preventive measures
+   - Suggest preventive measures based on industry standards
    - Include quick wins and long-term strategies
    - Make recommendations feel urgent but achievable
+   - **Cite authoritative sources** (OSHA, NIOSH, industry standards) when available
+   - Include links to relevant safety standards and guidelines
 
 4. **The Bottom Line** (Summary)
    - One-sentence takeaway
@@ -1126,14 +1309,21 @@ Formatting Guidelines:
         
         try:
             # OPTIMIZATION: Call AI with tools (streaming enabled)
+            # Note: reasoning parameter requires OpenAI SDK >= 1.58.0 or use extra_body
             stream = await client.chat.completions.create(
                 model=model,
                 messages=messages,
                 tools=TOOLS,
                 tool_choice="auto",
                 temperature=0.1,  # Low temp for consistency
-                max_tokens=20000,
+                max_tokens=30000,
                 stream=True,  # Enable streaming
+                extra_body={  # Use extra_body for OpenRouter-specific params
+                    "reasoning": {
+                        "effort": "high",
+                        "exclude": False
+                    }
+                },
                 extra_headers={
                     "HTTP-Referer": "http://localhost:8000",
                     "X-Title": "Safety Copilot"
@@ -1144,11 +1334,25 @@ Formatting Guidelines:
             assistant_message = None
             content_buffer = ""
             tool_calls_buffer = {}
+            reasoning_buffer = ""  # For reasoning tokens
+            reasoning_details_buffer = []  # For reasoning_details array
             token_count = 0
             has_tool_calls = False
             
             async for chunk in stream:
                 delta = chunk.choices[0].delta
+                
+                # Collect reasoning tokens (OpenRouter reasoning models)
+                if hasattr(delta, 'reasoning') and delta.reasoning:
+                    reasoning_buffer += delta.reasoning
+                    yield {
+                        "type": "reasoning_token",
+                        "token": delta.reasoning
+                    }
+                
+                # Collect reasoning_details (for preserving reasoning blocks)
+                if hasattr(delta, 'reasoning_details') and delta.reasoning_details:
+                    reasoning_details_buffer.extend(delta.reasoning_details)
                 
                 # Collect tool calls (don't stream partial args - reduces overhead)
                 if delta.tool_calls:
@@ -1193,6 +1397,10 @@ Formatting Guidelines:
                         "content": content_buffer or None
                     }
                     
+                    # Add reasoning_details if present (for preserving reasoning blocks)
+                    if reasoning_details_buffer:
+                        assistant_message_dict["reasoning_details"] = reasoning_details_buffer
+                    
                     # Add tool calls if present
                     if tool_calls_buffer:
                         assistant_message_dict["tool_calls"] = [
@@ -1215,8 +1423,18 @@ Formatting Guidelines:
                                 })()
                             })() for tc in tool_calls_buffer.values()
                         ]
+                        # Add reasoning to object if present
+                        if reasoning_buffer:
+                            assistant_message.reasoning = reasoning_buffer
+                        if reasoning_details_buffer:
+                            assistant_message.reasoning_details = reasoning_details_buffer
                     else:
-                        assistant_message = type('obj', (), {'content': content_buffer, 'tool_calls': None})()
+                        assistant_message = type('obj', (), {
+                            'content': content_buffer,
+                            'tool_calls': None,
+                            'reasoning': reasoning_buffer if reasoning_buffer else None,
+                            'reasoning_details': reasoning_details_buffer if reasoning_details_buffer else None
+                        })()
             
             # Check if AI wants to use tools
             if assistant_message and hasattr(assistant_message, 'tool_calls') and assistant_message.tool_calls:
@@ -1271,7 +1489,11 @@ Formatting Guidelines:
                     
                     # Execute tool
                     if function_name in TOOL_FUNCTIONS:
-                        result = TOOL_FUNCTIONS[function_name](**function_args)
+                        # Handle async tools (search_web)
+                        if asyncio.iscoroutinefunction(TOOL_FUNCTIONS[function_name]):
+                            result = await TOOL_FUNCTIONS[function_name](**function_args)
+                        else:
+                            result = TOOL_FUNCTIONS[function_name](**function_args)
                         
                         yield {
                             "type": "tool_result",
@@ -1326,7 +1548,11 @@ Formatting Guidelines:
                                     "arguments": corrected_args,
                                     "message": "🔁 Auto-corrected sheet name(s) and retried"
                                 }
-                                result2 = TOOL_FUNCTIONS[function_name](**corrected_args)
+                                # Handle async tools
+                                if asyncio.iscoroutinefunction(TOOL_FUNCTIONS[function_name]):
+                                    result2 = await TOOL_FUNCTIONS[function_name](**corrected_args)
+                                else:
+                                    result2 = TOOL_FUNCTIONS[function_name](**corrected_args)
                                 yield {
                                     "type": "tool_result",
                                     "tool": function_name,
