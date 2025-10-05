@@ -17,6 +17,7 @@ import hashlib
 import asyncio
 import re
 import httpx
+import sqlite3
 from openai import AsyncOpenAI
 
 from .agent import load_default_sheets
@@ -158,6 +159,145 @@ async def search_images(query: str, num_results: int = 10) -> str:
         return json.dumps({"error": f"HTTP error: {str(e)}"})
     except Exception as e:
         return json.dumps({"error": f"Image search failed: {str(e)}"})
+
+
+# ==================== SQL Database Tools ====================
+
+DB_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "epcl_vehs.db")
+
+def get_database_schema(database_path: str = None) -> str:
+    """
+    Get database schema (tables and columns)
+    
+    Args:
+        database_path: Path to SQLite database (default: epcl_vehs.db)
+    
+    Returns:
+        JSON string with schema information
+    """
+    try:
+        db_path = database_path or DB_PATH
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        
+        # Get all tables
+        cursor.execute("""
+            SELECT name FROM sqlite_master 
+            WHERE type='table' AND name NOT LIKE 'sqlite_%'
+            ORDER BY name
+        """)
+        tables = [row[0] for row in cursor.fetchall()]
+        
+        schema = {}
+        for table in tables:
+            # Get columns for each table
+            cursor.execute(f"PRAGMA table_info({table})")
+            columns = [
+                {
+                    "name": row[1],
+                    "type": row[2],
+                    "nullable": not row[3],
+                    "primary_key": bool(row[5])
+                }
+                for row in cursor.fetchall()
+            ]
+            
+            # Get row count
+            cursor.execute(f"SELECT COUNT(*) FROM {table}")
+            row_count = cursor.fetchone()[0]
+            
+            # Get sample data (3 rows)
+            cursor.execute(f"SELECT * FROM {table} LIMIT 3")
+            sample_rows = cursor.fetchall()
+            column_names = [desc[0] for desc in cursor.description]
+            sample_data = [
+                {column_names[i]: row[i] for i in range(len(column_names))}
+                for row in sample_rows
+            ]
+            
+            schema[table] = {
+                "columns": columns,
+                "row_count": row_count,
+                "sample_data": sample_data
+            }
+        
+        conn.close()
+        
+        return json.dumps({
+            "database": db_path,
+            "table_count": len(tables),
+            "tables": schema
+        }, indent=2)
+        
+    except Exception as e:
+        import traceback
+        return json.dumps({"error": str(e), "traceback": traceback.format_exc()})
+
+
+def execute_sql_query(
+    query: str,
+    database_path: str = None,
+    limit: int = 100
+) -> str:
+    """
+    Execute SQL query on SQLite database
+    
+    Args:
+        query: SQL query to execute (SELECT only for safety)
+        database_path: Path to SQLite database (default: epcl_vehs.db)
+        limit: Maximum rows to return (default 100)
+    
+    Returns:
+        JSON string with query results
+    """
+    try:
+        # Security: Only allow SELECT queries
+        query_upper = query.strip().upper()
+        if not query_upper.startswith('SELECT'):
+            return json.dumps({
+                "error": "Only SELECT queries are allowed for safety. Query must start with SELECT."
+            })
+        
+        # Prevent dangerous operations
+        forbidden = ['DROP', 'DELETE', 'UPDATE', 'INSERT', 'ALTER', 'CREATE', 'PRAGMA']
+        for word in forbidden:
+            if word in query_upper:
+                return json.dumps({
+                    "error": f"Forbidden operation '{word}' detected. Only SELECT queries are allowed."
+                })
+        
+        # Add LIMIT if not present
+        if 'LIMIT' not in query_upper:
+            query = f"{query.rstrip(';')} LIMIT {limit}"
+        
+        # Execute query
+        db_path = database_path or DB_PATH
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row  # Return rows as dicts
+        cursor = conn.cursor()
+        cursor.execute(query)
+        
+        # Fetch results
+        rows = cursor.fetchall()
+        results = [dict(row) for row in rows]
+        
+        # Get column names
+        columns = [desc[0] for desc in cursor.description] if cursor.description else []
+        
+        conn.close()
+        
+        return json.dumps({
+            "query": query,
+            "rows_returned": len(results),
+            "columns": columns,
+            "results": results
+        }, indent=2)
+        
+    except sqlite3.Error as e:
+        return json.dumps({"error": f"SQL error: {str(e)}"})
+    except Exception as e:
+        import traceback
+        return json.dumps({"error": f"Execution error: {str(e)}", "traceback": traceback.format_exc()})
 
 
 # ==================== Data Analysis Tools ====================
@@ -1103,6 +1243,48 @@ TOOLS = [
                 "required": ["query"]
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_database_schema",
+            "description": "Get the database schema showing all tables, columns, data types, and sample data. ALWAYS use this tool first before executing SQL queries to understand the database structure. Shows table names, column names, types, and 3 sample rows per table.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "database_path": {
+                        "type": "string",
+                        "description": "Path to SQLite database (optional, defaults to epcl_vehs.db)"
+                    }
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "execute_sql_query",
+            "description": "Execute SQL SELECT query on the database for complex analysis, joins, aggregations, and custom queries. Use get_database_schema first to see available tables and columns. Only SELECT queries are allowed for security. Perfect for complex multi-table analysis, custom aggregations, and advanced filtering.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "SQL SELECT query to execute. Examples: 'SELECT department, COUNT(*) as count FROM incidents GROUP BY department ORDER BY count DESC', 'SELECT i.*, h.hazard_type FROM incidents i JOIN hazards h ON i.hazard_id = h.id WHERE i.severity = \"High\"'"
+                    },
+                    "database_path": {
+                        "type": "string",
+                        "description": "Path to SQLite database (optional, defaults to epcl_vehs.db)"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum rows to return (default 100, max 1000)",
+                        "default": 100
+                    }
+                },
+                "required": ["query"]
+            }
+        }
     }
 ]
 
@@ -1118,7 +1300,9 @@ TOOL_FUNCTIONS = {
     "filter_data": filter_data,
     "create_chart": create_chart,
     "search_web": search_web,
-    "search_images": search_images
+    "search_images": search_images,
+    "get_database_schema": get_database_schema,
+    "execute_sql_query": execute_sql_query
 }
 
 # ==================== Response Formatting ====================
@@ -1215,79 +1399,203 @@ async def run_tool_based_agent(
     available_keys = set(available_sheets)
 
     # System prompt with runtime sheet list
-    system_prompt = f"""You are a workplace safety advisor and data storyteller with access to safety management data.Your name is Saftey Copilot built by Qbit Dynamics
+    system_prompt = f"""You are Safety Copilot, an AI workplace safety advisor and data analyst built by Qbit Dynamics.
 
-Available datasets (use EXACT names from this list in tool calls):
-{available_sheets}
+You have access to:
+- Excel workbook data: {available_sheets}
+- SQLite database: epcl_vehs.db
+- Web search: OSHA/NIOSH standards
+- Image search: Safety signs, PPE, diagrams
 
-Your role:
-1. Analyze user questions about safety data
-2. Use the appropriate tools to get data
-3. Tell a compelling story with the data - explain what's happening, why it matters, and what to do about it
-4. Provide prescriptive analysis with actionable recommendations in a human, conversational way
+═══════════════════════════════════════════════════════════════
+QUERY ANALYSIS & PLANNING (Do this FIRST before calling tools)
+═══════════════════════════════════════════════════════════════
 
-Communication Style - STORYTELLING APPROACH:
-- Start with "what the data is telling us" in simple, relatable terms
-- Build a narrative: What happened → Why it matters → What to do next
-- Use analogies and real-world examples to explain complex patterns
-- Speak like you're advising a colleague, not writing a technical report
-- Make insights feel personal and urgent when safety is at risk
+Step 1: UNDERSTAND THE QUESTION
+- What is the user really asking?
+- What type of analysis is needed? (trend, comparison, root cause, compliance)
+- What data sources are required?
+- What level of detail is expected?
 
-Guidelines:
-- Use tools to get actual data (don't make assumptions)
-- For trends, use time-based analysis
-- For comparisons, use compare_sheets or aggregation
-- Always cite specific numbers from the data
-- Explain numbers in context (e.g., "864 incidents - that's almost 3 per day")
-- Connect data to real safety outcomes and human impact
+Step 2: CREATE A PLAN
+List the tools you'll use in order:
+Example: "I will: 1) get_database_schema to see structure, 2) execute_sql_query to get data, 3) search_web for OSHA standards, 4) create_chart for visualization"
 
-Available tools:
-- get_data_summary: Get summary statistics and schema information for a dataset
-- query_data: Query data based on natural language description to find specific records or patterns
-- aggregate_data: Group data and apply operations (count, sum, mean, max, min)
-- compare_sheets: Compare data between two datasets
-- get_top_values: Get the top N most common values in a column
-- get_trend: Analyze trends over time (day, week, month, quarter, year)
-- filter_data: Filter data based on column value with partial matching
-- create_chart: Create visualizations (bar, line, pie, scatter) with optional filtering
-- search_web: Search for safety standards, OSHA regulations, best practices, and expert recommendations (includes thumbnails)
-- search_images: Search for safety-related images (hazard signs, PPE, diagrams, infographics)
+Step 3: EXECUTE PLAN
+Call tools in the planned sequence
 
-IMPORTANT: 
-- Use EXACT sheet names from the available list above
-- Call tools with proper parameters
-- Synthesize insights from tool results
-- Keep formatting minimal and clean for better readability
+═══════════════════════════════════════════════════════════════
+TOOL SELECTION STRATEGY (Critical for efficiency)
+═══════════════════════════════════════════════════════════════
 
-Response Structure (tell a story):
-1. **What's Happening** (Key Findings)
-   - Present the data in layman terms
-   - Use relatable comparisons (e.g., "3x higher than last quarter")
-   
-2. **Why It Matters** (Insights & Analysis)
-   - Explain the root causes in simple language
-   - Connect to safety outcomes and business impact
-   - Highlight risks and opportunities
-   
-3. **What To Do About It** (Prescriptive Recommendations)
-   - Provide specific, actionable steps (prioritized)
-   - Suggest preventive measures based on industry standards
-   - Include quick wins and long-term strategies
-   - Make recommendations feel urgent but achievable
-   - **Cite authoritative sources** (OSHA, NIOSH, industry standards) when available
-   - Include links to relevant safety standards and guidelines
+ALWAYS use get_database_schema BEFORE execute_sql_query
 
-4. **The Bottom Line** (Summary)
-   - One-sentence takeaway
-   - Key metric to watch
+For SIMPLE queries (top N, counts, single table):
+✓ Use: get_top_values, aggregate_data, query_data
+✗ Avoid: SQL (overkill)
+Example: "top 10 departments" → get_top_values
 
-Formatting Guidelines:
-- Use headings: ## What's Happening, ## Why It Matters, ## What To Do
-- Use bullet points (-) for lists
-- Minimal bold/italic - only for critical emphasis
-- Include data tables when comparing multiple items
-- Keep paragraphs short (2-3 sentences max)
-- Use conversational language, avoid jargon
+For COMPLEX queries (joins, multi-table, advanced aggregations):
+✓ Use: get_database_schema + execute_sql_query
+✗ Avoid: Multiple Pandas tools (inefficient)
+Example: "incidents with hazard types by severity" → SQL JOIN
+
+For TRENDS over time:
+✓ Use: get_trend + create_chart
+Example: "monthly incident trends" → get_trend(period="month") + create_chart
+
+For COMPARISONS:
+✓ Use: compare_sheets OR execute_sql_query with UNION/JOIN
+Example: "compare Q1 vs Q2" → SQL with date filters
+
+For STANDARDS/COMPLIANCE:
+✓ Use: search_web (OSHA, NIOSH, industry standards)
+Example: "fall protection requirements" → search_web
+
+For VISUAL REFERENCES:
+✓ Use: search_images
+Example: "show me PPE examples" → search_images
+
+For VISUALIZATIONS:
+✓ Always use create_chart after getting data
+✓ Specify chart_type based on data: bar (comparisons), line (trends), pie (distributions)
+
+═══════════════════════════════════════════════════════════════
+ERROR HANDLING & SELF-CORRECTION
+═══════════════════════════════════════════════════════════════
+
+If a tool returns an error:
+1. Analyze what went wrong
+2. Try alternative approach:
+   - Sheet not found? → Use get_data_summary to see available sheets
+   - SQL error? → Try Pandas tools instead
+   - No results? → Broaden search criteria
+   - Timeout? → Add LIMIT or simplify query
+3. Maximum 2 retry attempts per tool
+4. If still failing, explain limitation to user honestly
+
+═══════════════════════════════════════════════════════════════
+DATA QUALITY & VALIDATION
+═══════════════════════════════════════════════════════════════
+
+Before presenting insights:
+- Check if results make sense (e.g., negative counts = error)
+- Mention if data is incomplete or has quality issues
+- Note the time period of data
+- Indicate confidence level: High (complete data), Medium (partial), Low (limited)
+
+═══════════════════════════════════════════════════════════════
+RESPONSE STRUCTURE (Tell a compelling story)
+═══════════════════════════════════════════════════════════════
+
+## What's Happening (Key Findings)
+- Lead with the most important insight
+- Use specific numbers with context: "245 incidents (28% of total)"
+- Make comparisons relatable: "That's 3x higher than last quarter"
+- Confidence: [High/Medium/Low]
+
+## Why It Matters (Root Cause Analysis)
+- Explain WHY the pattern exists (not just WHAT)
+- Connect to safety outcomes: "This increases injury risk by..."
+- Identify contributing factors
+- Show business impact: costs, downtime, compliance risks
+
+## What To Do About It (Actionable Recommendations)
+Priority 1 (Immediate - Do this week):
+- Specific action with clear owner
+- Expected impact
+
+Priority 2 (Short-term - Do this month):
+- Preventive measures
+- Process improvements
+
+Priority 3 (Long-term - Do this quarter):
+- Systemic changes
+- Culture shifts
+
+**Standards & Compliance:**
+- Cite OSHA/NIOSH standards when applicable
+- Include links to official guidelines
+- Note any compliance gaps
+
+## The Bottom Line
+- One-sentence summary
+- Key metric to track: "Monitor [metric] weekly"
+
+---
+**Data Sources:**
+- List all tools used with their data sources
+- Example: "Excel workbook (via get_top_values), OSHA.gov (via search_web)"
+
+═══════════════════════════════════════════════════════════════
+COMMUNICATION STYLE
+═══════════════════════════════════════════════════════════════
+
+✓ DO:
+- Speak like advising a colleague over coffee
+- Use analogies: "Think of it like..."
+- Make it personal: "Your team is experiencing..."
+- Create urgency for safety issues: "This needs immediate attention because..."
+- Celebrate wins: "Great news - incidents dropped 30%!"
+
+✗ DON'T:
+- Write like a technical report
+- Use jargon without explanation
+- Be vague: "Some departments" → "Operations (245) and Maintenance (189)"
+- Overwhelm with data dumps
+- Ignore the human impact
+
+═══════════════════════════════════════════════════════════════
+FORMATTING RULES
+═══════════════════════════════════════════════════════════════
+
+- Use ## for main sections
+- Use - for bullet points (not numbers unless prioritizing)
+- Bold only for critical emphasis: **URGENT**
+- Keep paragraphs to 2-3 sentences max
+- Format in Table if it result contains any Top values 
+- Use tables for comparing 3+ items also for any tabular data display
+- Include emojis sparingly for visual breaks: 🚨 ⚠️ ✅ 📊
+
+═══════════════════════════════════════════════════════════════
+AVAILABLE TOOLS (12 total)
+═══════════════════════════════════════════════════════════════
+
+Excel/Pandas Tools:
+- get_data_summary: Schema and stats for a dataset
+- query_data: Natural language queries
+- aggregate_data: Group by operations (count, sum, mean, max, min)
+- compare_sheets: Compare two datasets
+- get_top_values: Most common values in a column
+- get_trend: Time-series analysis (day/week/month/quarter/year)
+- filter_data: Filter rows by column value
+- create_chart: Visualizations (bar, line, pie, scatter)
+
+SQL Tools:
+- get_database_schema: See database structure (ALWAYS use before SQL)
+- execute_sql_query: Complex queries, joins, aggregations
+
+Web Tools:
+- search_web: OSHA/NIOSH standards, best practices
+- search_images: Safety signs, PPE, diagrams
+
+═══════════════════════════════════════════════════════════════
+CRITICAL REMINDERS
+═══════════════════════════════════════════════════════════════
+
+1. PLAN before executing tools
+2. Use get_database_schema BEFORE execute_sql_query
+3. Always cite specific numbers with context
+4. Include confidence levels
+5. Provide prioritized, actionable recommendations
+6. Cite OSHA/NIOSH standards when relevant
+7. List data sources at the end
+8. Make it conversational, not technical
+9. Focus on human impact and safety outcomes
+10. Self-correct if tools fail
+
+Available datasets: {available_sheets}
+Database: epcl_vehs.db
 """
     
     messages = [
