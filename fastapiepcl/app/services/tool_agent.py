@@ -1603,17 +1603,23 @@ Database: epcl_vehs.db
         {"role": "user", "content": query}
     ]
     
+    # Deduplication: avoid repeating identical tool calls
+    recent_tool_calls: Dict[str, str] = {}
+    repeat_counts: Dict[str, int] = {}
+
+    def _tool_key(name: str, args: Dict[str, Any]) -> str:
+        """Stable key for a tool call to detect repeats."""
+        try:
+            return f"{name}:{json.dumps(args, sort_keys=True)}"
+        except Exception:
+            return f"{name}:{str(args)}"
+
     iteration = 0
     
     while iteration < max_iterations:
         iteration += 1
         
-        # OPTIMIZATION: Only show thinking on first iteration
-        if iteration == 1:
-            yield {
-                "type": "thinking",
-                "message": "🤔 Analyzing..."
-            }
+        # NOTE: Suppress separate 'thinking' event; keep only reasoning tokens
         
         try:
             # OPTIMIZATION: Call AI with tools (streaming enabled)
@@ -1644,7 +1650,6 @@ Database: epcl_vehs.db
             tool_calls_buffer = {}
             reasoning_buffer = ""  # For reasoning tokens
             reasoning_details_buffer = []  # For reasoning_details array
-            token_count = 0
             has_tool_calls = False
             
             async for chunk in stream:
@@ -1680,21 +1685,8 @@ Database: epcl_vehs.db
                         if tc.function.arguments:
                             tool_calls_buffer[idx]["function"]["arguments"] += tc.function.arguments
                 
-                # OPTIMIZATION: Batch content tokens (every 10 tokens)
-                # BUT: Don't stream content if tool calls are present (prevents duplicate responses)
-                if delta.content and not has_tool_calls:
-                    content_buffer += delta.content
-                    token_count += 1
-                    
-                    # Stream in batches of 10 tokens for efficiency
-                    if token_count >= 10:
-                        yield {
-                            "type": "thinking_token",
-                            "token": content_buffer[-len(delta.content) * 10:]
-                        }
-                        token_count = 0
-                elif delta.content:
-                    # Still collect content even if tool calls present (for message history)
+                # Accumulate assistant content silently; do not emit 'thinking_token'
+                if delta.content:
                     content_buffer += delta.content
                 
                 # Get finish reason
@@ -1795,6 +1787,32 @@ Database: epcl_vehs.db
                         "message": f"🔧 Using tool: {function_name}"
                     }
                     
+                    # Deduplicate identical tool calls (short-circuit repeats)
+                    key = _tool_key(function_name, function_args)
+                    if key in recent_tool_calls:
+                        repeat_counts[key] = repeat_counts.get(key, 1) + 1
+                        cached = recent_tool_calls[key]
+                        # Return cached result again so the model can consume it
+                        yield {
+                            "type": "tool_result",
+                            "tool": function_name,
+                            "result": cached,
+                            "repeat": True
+                        }
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "name": function_name,
+                            "content": cached
+                        })
+                        # On second repeat, nudge synthesis explicitly
+                        if repeat_counts[key] >= 2:
+                            messages.append({
+                                "role": "assistant",
+                                "content": "I already have the data from previous tool calls. I will synthesize the final answer now without re-calling the tool."
+                            })
+                        continue
+
                     # Execute tool
                     if function_name in TOOL_FUNCTIONS:
                         # Handle async tools (search_web)
@@ -1802,6 +1820,8 @@ Database: epcl_vehs.db
                             result = await TOOL_FUNCTIONS[function_name](**function_args)
                         else:
                             result = TOOL_FUNCTIONS[function_name](**function_args)
+                        # Cache successful result for deduplication
+                        recent_tool_calls[key] = result
                         
                         yield {
                             "type": "tool_result",
@@ -1894,7 +1914,7 @@ Database: epcl_vehs.db
                 continue
             
             else:
-                # AI provided final answer (already streamed via thinking_token)
+                # AI provided final answer (content was accumulated silently)
                 final_answer = content_buffer
                 
                 # ENHANCEMENT: Ensure response is well-formatted
