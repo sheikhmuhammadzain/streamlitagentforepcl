@@ -160,16 +160,22 @@ async def heinrich_safety_pyramid(
     department: Optional[str] = Query(None, description="Filter by department", example="Process"),
 ):
     """
-    Heinrich's Safety Pyramid - The foundational safety analytics chart.
-    
-    Returns a hierarchical pyramid structure showing:
-    - Layer 1 (Top): Serious injuries/fatalities
-    - Layer 2: Minor injuries
-    - Layer 3: First aid cases / near misses
-    - Layer 4: Unsafe conditions (hazards)
-    - Layer 5 (Bottom): At-risk behaviors (audit/inspection findings)
-    
-    Industry standard ratios: 1 : 10 : 30 : 600 : 3000
+    Heinrich's Safety Pyramid aligned to the provided tiers and names:
+    - 1: Fatality
+    - 30: Lost Workday Cases
+    - 300: Recordable Injuries
+    - 3,000: Near Misses (estimated)
+    - 300,000: At-Risk Behaviors (estimated)
+
+    Calculation (from your data):
+    - Fatality: incidents whose consequence mentions 'fatal' OR highest severity (fallback)
+    - Lost Workday Cases: incidents with severity_score >= 3 (LTIR logic), excluding fatalities
+    - Recordable Injuries: incidents with severity_score >= 2 (TRIR logic), excluding lost-time and fatalities
+    - Near Misses (estimated): hazards count + incidents with incident_type containing 'near miss'
+    - At-Risk Behaviors (estimated): non-null findings in audits and inspections
+
+    We also compute Heinrich-expected counts using the 1:30:300:3000:300000 ratio anchored on the
+    top-most available actual tier (prefer Fatalities; fallback to Lost Workday, then Recordable).
     """
     inc_df = get_incident_df()
     haz_df = get_hazard_df()
@@ -180,75 +186,131 @@ async def heinrich_safety_pyramid(
     inc_df = _apply_filters(inc_df, start_date, end_date, location, department)
     haz_df = _apply_filters(haz_df, start_date, end_date, location, department)
     
-    pyramid_data = {
-        "Serious Injury/Fatality": 0,
-        "Minor Injury": 0,
-        "First Aid/Near Miss": 0,
-        "Unsafe Conditions": 0,
-        "At-Risk Behaviors": 0,
+    # ---------- Derive actual tier counts from data ----------
+    tiers = {
+        "Fatality": 0,
+        "Lost Workday Cases": 0,
+        "Recordable Injuries": 0,
+        "Near Misses (estimated)": 0,
+        "At-Risk Behaviors (estimated)": 0,
     }
-    
-    # Layer 1-3: Classify incidents by severity
+
+    # Incidents mapping
     if inc_df is not None and not inc_df.empty:
-        sev_score_col = _resolve_column(inc_df, ["severity_score", "severity", "risk_score"])
-        sev_text_col = _resolve_column(inc_df, [
-            "actual_consequence_incident", "worst_case_consequence_incident",
-            "relevant_consequence_incident", "severity_level"
-        ])
-        
-        for idx, row in inc_df.iterrows():
-            sev_score = row[sev_score_col] if sev_score_col else None
-            sev_text = row[sev_text_col] if sev_text_col else None
-            level = _classify_severity_level(sev_score, sev_text)
-            pyramid_data[level] += 1
-    
-    # Layer 4: Unsafe conditions from hazards
-    if haz_df is not None and not haz_df.empty:
-        pyramid_data["Unsafe Conditions"] = len(haz_df)
-    
-    # Layer 5: At-risk behaviors from audits + inspections
-    at_risk_count = 0
-    if aud_df is not None and not aud_df.empty:
-        finding_col = _resolve_column(aud_df, ["finding", "findings"])
-        if finding_col:
-            at_risk_count += aud_df[finding_col].notna().sum()
-    
-    if insp_df is not None and not insp_df.empty:
-        finding_col = _resolve_column(insp_df, ["finding", "findings"])
-        if finding_col:
-            at_risk_count += insp_df[finding_col].notna().sum()
-    
-    pyramid_data["At-Risk Behaviors"] = at_risk_count
-    
-    # Calculate ratios (normalized to serious injuries)
-    serious = pyramid_data["Serious Injury/Fatality"]
-    ratios = {}
-    if serious > 0:
-        for key, val in pyramid_data.items():
-            ratios[key] = round(val / serious, 2)
+        sev_col = _resolve_column(inc_df, ["severity_score", "severity"])  # numeric preferred
+        act_cons = _resolve_column(inc_df, ["actual_consequence_incident"])  # text consequence
+        worst_cons = _resolve_column(inc_df, ["worst_case_consequence_incident"])  # fallback text
+        type_col = _resolve_column(inc_df, ["incident_type", "category"])  # near miss text
+
+        # Fatalities by explicit text OR highest severity bucket
+        fat_mask = pd.Series([False] * len(inc_df))
+        if act_cons and act_cons in inc_df.columns:
+            fat_mask |= inc_df[act_cons].astype(str).str.contains("fatal", case=False, na=False)
+        if worst_cons and worst_cons in inc_df.columns:
+            fat_mask |= inc_df[worst_cons].astype(str).str.contains("fatal", case=False, na=False)
+        if sev_col and sev_col in inc_df.columns:
+            sev_vals = pd.to_numeric(inc_df[sev_col], errors="coerce")
+            # If scale is 0-5, consider 5 as fatal proxy; if 0-4, consider >=4
+            max_val = sev_vals.max(skipna=True)
+            if pd.notna(max_val):
+                thr = 5 if max_val >= 5 else 4
+                fat_mask |= sev_vals >= thr
+        tiers["Fatality"] = int(fat_mask.sum())
+
+        # Lost Workday Cases: severity >= 3 (exclude fatalities)
+        lti_mask = pd.Series([False] * len(inc_df))
+        if sev_col and sev_col in inc_df.columns:
+            sev_vals = pd.to_numeric(inc_df[sev_col], errors="coerce")
+            lti_mask = sev_vals >= 3
+        if lti_mask.any():
+            lti_mask &= ~fat_mask
+        tiers["Lost Workday Cases"] = int(lti_mask.sum())
+
+        # Recordable Injuries: severity >= 2 (exclude lost-time and fatalities)
+        rec_mask = pd.Series([False] * len(inc_df))
+        if sev_col and sev_col in inc_df.columns:
+            sev_vals = pd.to_numeric(inc_df[sev_col], errors="coerce")
+            rec_mask = sev_vals >= 2
+        if rec_mask.any():
+            rec_mask &= ~(lti_mask | fat_mask)
+        tiers["Recordable Injuries"] = int(rec_mask.sum())
+
+        # Near-miss incidents text
+        inc_near = 0
+        if type_col and type_col in inc_df.columns:
+            inc_near = int(inc_df[type_col].astype(str).str.contains("near miss|near-miss|nearmiss", case=False, na=False).sum())
     else:
-        ratios = {key: 0 for key in pyramid_data.keys()}
-    
-    # Build response
+        inc_near = 0
+
+    # Hazards as near misses
+    haz_count = 0
+    if haz_df is not None and not haz_df.empty:
+        haz_count = int(len(haz_df))
+    tiers["Near Misses (estimated)"] = int(haz_count + inc_near)
+
+    # At-risk behaviors from audits and inspections (non-null findings)
+    at_risk = 0
+    if aud_df is not None and not aud_df.empty:
+        fcol = _resolve_column(aud_df, ["finding", "findings"]) or None
+        if fcol:
+            at_risk += int(aud_df[fcol].notna().sum())
+        else:
+            at_risk += int(len(aud_df))
+    if insp_df is not None and not insp_df.empty:
+        fcol = _resolve_column(insp_df, ["finding", "findings"]) or None
+        if fcol:
+            at_risk += int(insp_df[fcol].notna().sum())
+        else:
+            at_risk += int(len(insp_df))
+    tiers["At-Risk Behaviors (estimated)"] = at_risk
+
+    # ---------- Heinrich expected counts (projection) ----------
+    # Try to anchor on Fatality; fallback to Lost Workday, then Recordable.
+    base = tiers["Fatality"]
+    anchor = "Fatality"
+    ratio = {
+        "Fatality": 1,
+        "Lost Workday Cases": 30,
+        "Recordable Injuries": 300,
+        "Near Misses (estimated)": 3000,
+        "At-Risk Behaviors (estimated)": 300000,
+    }
+    if base == 0:
+        if tiers["Lost Workday Cases"] > 0:
+            base = tiers["Lost Workday Cases"] / ratio["Lost Workday Cases"]
+            anchor = "Lost Workday Cases"
+        elif tiers["Recordable Injuries"] > 0:
+            base = tiers["Recordable Injuries"] / ratio["Recordable Injuries"]
+            anchor = "Recordable Injuries"
+        else:
+            base = 0
+
+    expected = {k: (int(round(base * v)) if base else 0) for k, v in ratio.items()}
+
+    # ---------- Build response ----------
+    order = ["Fatality", "Lost Workday Cases", "Recordable Injuries", "Near Misses (estimated)", "At-Risk Behaviors (estimated)"]
+    colors = ["#616161", "#9e9e9e", "#a3d977", "#7cc7c3", "#7fbf7f"]
     layers = []
-    for idx, (label, count) in enumerate(pyramid_data.items()):
+    for i, label in enumerate(order):
         layers.append({
-            "level": 5 - idx,  # 5 = top, 1 = bottom
+            "level": len(order) - i,  # 5 = top, 1 = bottom
             "label": label,
-            "count": int(count),
-            "ratio": ratios[label],
-            "color": [
-                "#d32f2f",  # Red - Serious
-                "#f57c00",  # Orange - Minor
-                "#fbc02d",  # Yellow - First Aid
-                "#7cb342",  # Light Green - Unsafe Conditions
-                "#66bb6a"   # Green - At-Risk Behaviors
-            ][idx]
+            "count": int(tiers[label]),
+            "heinrich_expected": int(expected[label]),
+            "anchor": anchor if i == 0 else None,
+            "color": colors[i],
         })
     
     return JSONResponse(content=to_native_json({
         "layers": layers,
-        "total_events": sum(pyramid_data.values()),
+        "totals": {
+            "fatalities": tiers["Fatality"],
+            "lost_workday_cases": tiers["Lost Workday Cases"],
+            "recordable_injuries": tiers["Recordable Injuries"],
+            "near_misses": tiers["Near Misses (estimated)"],
+            "at_risk_behaviors": tiers["At-Risk Behaviors (estimated)"],
+        },
+        "heinrich_expected": expected,
         "near_miss_ratio": _calculate_near_miss_ratio(inc_df, haz_df),
         "filters_applied": {
             "start_date": start_date,

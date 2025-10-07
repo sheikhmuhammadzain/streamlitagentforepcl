@@ -106,10 +106,16 @@ def _indicator_columns() -> Dict[str, List[str]]:
         "audit": [
             "audit_status",
             "start_date",
+            "audit_title",
+            "audit_id",
+            "audit_type_epcl",
         ],
         "inspection": [
             "audit_status",
             "start_date",
+            "checklist_category",
+            "checklist category",
+            "finding",
         ],
     }
 
@@ -124,9 +130,39 @@ def _score_sheet_for_dataset(df: pd.DataFrame, indicators: List[str]) -> int:
 
 
 def _choose_by_name_token(sheets: Dict[str, pd.DataFrame], token: str) -> Optional[pd.DataFrame]:
+    """Choose a sheet by name token with smarter matching.
+    Preference order:
+      1) Exact match on token (case-insensitive), or common variants like 'Total <token>'
+      2) Name contains token but avoids conflicting dataset tokens (e.g., avoid 'audit' when selecting 'inspection')
+      3) First name that contains the token
+    """
+    token_l = token.lower().strip()
+    avoid = {"audit": ["inspection", "finding", "findings"], "inspection": ["audit", "finding", "findings"]}.get(token_l, [])
+
+    # 1) Exact/clear variants
     for name, df in sheets.items():
-        if token.lower() in str(name).lower():
+        ln = str(name).strip().lower()
+        if (
+            ln == token_l
+            or ln == f"total {token_l}"
+            or ln == f"{token_l} total"
+            or ln.startswith(f"{token_l} ")
+            or ln.endswith(f" {token_l}")
+        ) and (not any(a in ln for a in avoid)):
             return df
+
+    # 2) Contains token, prefer without avoid tokens
+    candidates: List[Tuple[str, pd.DataFrame]] = []
+    for name, df in sheets.items():
+        ln = str(name).strip().lower()
+        if token_l in ln:
+            candidates.append((ln, df))
+    if candidates:
+        for ln, df in candidates:
+            if not any(a in ln for a in avoid):
+                return df
+        # fallback to first candidate
+        return candidates[0][1]
     return None
 
 
@@ -141,6 +177,13 @@ def get_default_dataframes() -> Dict[str, Optional[pd.DataFrame]]:
 
     indicators = _indicator_columns()
     best: Dict[str, Tuple[int, Optional[pd.DataFrame]]] = {k: (0, None) for k in indicators.keys()}
+
+    # Prefer name-token matches up-front so scoring won't override clear intent
+    for key in list(indicators.keys()):
+        cand = _choose_by_name_token(sheets, key)
+        if cand is not None:
+            # Use a very high score to lock this selection unless a better explicit rule is added later
+            best[key] = (10_000, cand)
 
     for name, df in sheets.items():
         for key, cols in indicators.items():

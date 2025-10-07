@@ -437,6 +437,89 @@ async def get_data_source_info():
     }))
 
 
+@router.get("/selected-sheets")
+async def get_selected_sheets():
+    """Return the sheet names that are currently selected for each dataset.
+    Useful to verify that 'inspection' and 'audit' are mapped to the correct Excel sheets.
+    """
+    from ..services.excel import get_dataset_selection_names
+    names = get_dataset_selection_names()
+    return JSONResponse(content=to_native_json(names))
+
+
+@router.get("/counts/all")
+async def get_all_counts():
+    """Return counts for incidents, hazards, audits, audit findings, inspections, inspection findings.
+    Uses dataset accessors for the four primary datasets and name-based matching for findings sheets.
+    """
+    from ..services.excel import load_default_sheets
+
+    # Primary datasets via accessors
+    inc_df = get_incident_df()
+    haz_df = get_hazard_df()
+    aud_df = get_audit_df()
+    insp_df = get_inspection_df()
+
+    counts = {
+        "incident": int(len(inc_df)) if inc_df is not None else 0,
+        "hazard": int(len(haz_df)) if haz_df is not None else 0,
+        "audit": int(len(aud_df)) if aud_df is not None else 0,
+        "inspection": int(len(insp_df)) if insp_df is not None else 0,
+    }
+
+    # Findings via sheet name tokens
+    sheets = load_default_sheets()
+    selected_sheet_names = {
+        "audit_findings": None,
+        "inspection_findings": None,
+    }
+
+    def _pick_sheet_by_tokens(tokens):
+        best_name = None
+        best_score = -1
+        for name in sheets.keys():
+            ln = str(name).strip().lower()
+            # must include all tokens
+            if all(tok in ln for tok in tokens):
+                score = 0
+                # prefer exact phrase matches
+                phrase = " ".join(tokens)
+                if ln == phrase:
+                    score += 5
+                if ln.startswith(phrase) or ln.endswith(phrase):
+                    score += 2
+                # prefer names containing 'findings' over 'finding'
+                if "findings" in ln:
+                    score += 1
+                if score > best_score:
+                    best_score = score
+                    best_name = name
+        return best_name
+
+    aud_find_name = _pick_sheet_by_tokens(["audit", "find"])
+    insp_find_name = _pick_sheet_by_tokens(["inspection", "find"])
+
+    aud_find_df = sheets.get(aud_find_name) if aud_find_name else None
+    insp_find_df = sheets.get(insp_find_name) if insp_find_name else None
+
+    counts.update({
+        "audit_findings": int(len(aud_find_df)) if aud_find_df is not None else 0,
+        "inspection_findings": int(len(insp_find_df)) if insp_find_df is not None else 0,
+    })
+
+    selected_sheet_names.update({
+        "audit_findings": aud_find_name,
+        "inspection_findings": insp_find_name,
+    })
+
+    payload = {
+        "counts": counts,
+        "selected_sheets": selected_sheet_names,
+        "timestamp": pd.Timestamp.utcnow().isoformat() + "Z",
+    }
+    return JSONResponse(content=to_native_json(payload))
+
+
 # ======================= DATA VALIDATION =======================
 
 @router.get("/validation/check")
@@ -941,4 +1024,455 @@ async def trace_all_charts():
         "total_charts": len(charts_summary),
         "charts": charts_summary,
         "note": "Use individual trace endpoints for detailed data source information"
+    }))
+
+
+# ======================= CHART DATA VALIDATION =======================
+
+def _resolve_column_local(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
+    if df is None or df.empty:
+        return None
+    colmap = {str(c).strip().lower(): c for c in df.columns}
+    # exact match first
+    for cand in candidates:
+        k = str(cand).strip().lower()
+        if k in colmap:
+            return colmap[k]
+    # relaxed contains
+    for cand in candidates:
+        k = str(cand).strip().lower()
+        for lk, orig in colmap.items():
+            if k in lk:
+                return orig
+    return None
+
+
+@router.get("/validate/charts")
+async def validate_charts():
+    """Validate that each analytics chart can resolve its required columns against the current Excel sheets.
+    Returns per-chart status with resolved columns and any missing ones.
+    """
+    inc = get_incident_df()
+    haz = get_hazard_df()
+    aud = get_audit_df()
+    ins = get_inspection_df()
+
+    results: List[Dict[str, Any]] = []
+
+    def add_result(name: str, endpoint: str, df: Optional[pd.DataFrame], reqs: Dict[str, List[str]]):
+        resolved: Dict[str, Optional[str]] = {}
+        missing: List[str] = []
+        for key, cands in reqs.items():
+            col = _resolve_column_local(df, cands) if isinstance(df, pd.DataFrame) else None
+            resolved[key] = col
+            if col is None:
+                missing.append(key)
+        status = "ok" if not missing else "missing_columns"
+        results.append({
+            "chart": name,
+            "endpoint": endpoint,
+            "status": status,
+            "resolved_columns": resolved,
+            "missing": missing,
+            "rows": int(len(df)) if isinstance(df, pd.DataFrame) else 0,
+        })
+
+    # Incident charts
+    add_result(
+        "Incident Trend", "/analytics/data/incident-trend",
+        inc, {"date": ["occurrence_date", "date of occurrence", "date reported", "date entered", "date"]}
+    )
+    add_result(
+        "Incident Type Distribution", "/analytics/data/incident-type-distribution",
+        inc, {"type": ["incident_type", "incident type(s)", "category", "accident type"]}
+    )
+    add_result(
+        "Root Cause Pareto", "/analytics/data/root-cause-pareto",
+        inc, {"root_cause": ["root_cause", "root cause"]}
+    )
+    add_result(
+        "Injury Severity Pyramid", "/analytics/data/injury-severity-pyramid",
+        inc, {"severity": [
+            "injury_classification",
+            "injury classification",
+            "actual_consequence_incident",
+            "actual consequence (incident)",
+            "relevant_consequence_incident",
+            "relevant consequence (incident)"
+        ]}
+    )
+    add_result(
+        "Department-Month Heatmap", "/analytics/data/department-month-heatmap",
+        inc, {
+            "department": ["department", "section"],
+            "date": ["occurrence_date", "date of occurrence", "date reported", "date"]
+        }
+    )
+    add_result(
+        "Consequence Gap", "/analytics/data/consequence-gap",
+        inc, {
+            "actual": ["actual_consequence_incident", "actual consequence (incident)"],
+            "worst": ["worst_case_consequence_incident", "worst case consequence (incident)"]
+        }
+    )
+    add_result(
+        "Incident Cost Trend", "/analytics/data/incident-cost-trend",
+        inc, {
+            "date": ["occurrence_date", "date of occurrence", "date reported"],
+            "cost": ["total cost", "estimated_cost_impact"]
+        }
+    )
+    
+    add_result(
+        "Repeated Incidents", "/analytics/data/repeated-incidents",
+        inc, {
+            "repeat_flag": ["repeated_incident", "repeated incident", "repeated_event", "repeated event"],
+            "location": [
+                "specific_location_of_occurrence",
+                "specific location of occurrence",
+                "sub_location",
+                "sub-location",
+                "sublocation",
+                "location"
+            ]
+        }
+    )
+
+    # Hazard charts
+    add_result(
+        "Hazard Trend (via Incident Trend)", "/analytics/data/incident-trend?dataset=hazard",
+        haz, {"date": ["occurrence_date", "date of occurrence", "date reported", "date entered", "date"]}
+    )
+    add_result(
+        "Hazard Cost Trend", "/analytics/data/hazard-cost-trend",
+        haz, {
+            "date": ["occurrence_date", "date of occurrence", "date reported"],
+            "cost": ["total cost", "estimated_cost_impact"]
+        }
+    )
+
+    # Audit charts
+    add_result(
+        "Audit Status Distribution", "/analytics/data/audit-status-distribution",
+        aud, {"status": ["audit_status", "audit status"]}
+    )
+    add_result(
+        "Audit Rating Trend", "/analytics/data/audit-rating-trend",
+        aud, {
+            "date": ["start_date", "start date"],
+            "rating": ["audit_rating", "audit rating"]
+        }
+    )
+
+    # Inspection charts
+    add_result(
+        "Inspection Coverage", "/analytics/data/inspection-coverage",
+        ins, {
+            "date": ["start_date", "start date"],
+            "status": ["audit_status", "audit status"]
+        }
+    )
+    add_result(
+        "Inspection Top Findings", "/analytics/data/inspection-top-findings",
+        ins, {
+            "category": ["checklist_category", "checklist category", "finding"]
+        }
+    )
+
+    # Advanced analytics validations
+    # Heinrich Pyramid
+    add_result(
+        "Heinrich - Incidents Layers",
+        "/analytics/advanced/heinrich-pyramid",
+        inc,
+        {
+            "severity_score_or_risk": ["severity_score", "severity", "risk_score"],
+            "severity_text": [
+                "actual_consequence_incident",
+                "worst_case_consequence_incident",
+                "relevant_consequence_incident",
+                "severity_level"
+            ],
+        },
+    )
+    add_result(
+        "Heinrich - Audits Findings",
+        "/analytics/advanced/heinrich-pyramid",
+        aud,
+        {"finding": ["finding", "findings"]},
+    )
+    add_result(
+        "Heinrich - Inspections Findings",
+        "/analytics/advanced/heinrich-pyramid",
+        ins,
+        {"finding": ["finding", "findings"]},
+    )
+
+    # Site Safety Index
+    add_result(
+        "Site Safety Index - Incidents",
+        "/analytics/advanced/site-safety-index",
+        inc,
+        {
+            "severity_score_or_risk": ["severity_score", "risk_score"],
+            "severity_text": ["actual_consequence_incident", "severity"],
+            "date": ["occurrence_date", "date"],
+            "status": ["status"],
+        },
+    )
+    add_result(
+        "Site Safety Index - Hazards",
+        "/analytics/advanced/site-safety-index",
+        haz,
+        {"risk": ["risk_score", "risk_level"]},
+    )
+    add_result(
+        "Site Safety Index - Audits",
+        "/analytics/advanced/site-safety-index",
+        aud,
+        {"status": ["audit_status", "status"]},
+    )
+
+    # Advanced KPIs
+    add_result(
+        "TRIR",
+        "/analytics/advanced/kpis/trir",
+        inc,
+        {"severity_for_recordable": ["severity_score", "risk_score"]},
+    )
+    add_result(
+        "LTIR",
+        "/analytics/advanced/kpis/ltir",
+        inc,
+        {"severity_for_lost_time": ["severity_score", "risk_score"]},
+    )
+    add_result(
+        "PSTIR",
+        "/analytics/advanced/kpis/pstir",
+        inc,
+        {"psm_marker": ["psm", "pse_category"]},
+    )
+    add_result(
+        "Near-Miss Ratio",
+        "/analytics/advanced/kpis/near-miss-ratio",
+        inc,
+        {"incident_type_for_near_miss": ["incident_type"]},
+    )
+
+    # ---------------- Additional General Charts (Plot-based) ----------------
+    # HSE Scorecard
+    add_result(
+        "HSE Scorecard",
+        "/analytics/hse-scorecard",
+        aud,
+        {"audit_status": ["audit_status", "status"]}
+    )
+
+    # HSE Performance Index (requires department; others optional)
+    add_result(
+        "HSE Performance Index",
+        "/analytics/hse-performance-index",
+        inc,
+        {"department": ["department"]}
+    )
+
+    # Risk Calendar Heatmap (strict)
+    add_result(
+        "Risk Calendar Heatmap",
+        "/analytics/risk-calendar-heatmap",
+        inc,
+        {"date": ["occurrence_date", "date"], "department": ["department"], "risk": ["risk_score"]}
+    )
+
+    # PSM Breakdown (optional, but check useful columns)
+    add_result(
+        "PSM Breakdown",
+        "/analytics/psm-breakdown",
+        inc,
+        {"psm": ["psm"], "pse_category": ["pse_category"]}
+    )
+
+    # Consequence Matrix (strict)
+    add_result(
+        "Consequence Matrix",
+        "/analytics/consequence-matrix",
+        inc,
+        {"actual": ["actual_consequence_incident"], "worst": ["worst_case_consequence_incident"]}
+    )
+
+    # Data Quality Metrics (key fields for richer output)
+    add_result(
+        "Data Quality Metrics",
+        "/analytics/data-quality-metrics",
+        inc,
+        {
+            "department": ["department"],
+            "root_cause_is_missing": ["root_cause_is_missing"],
+            "corrective_actions_is_missing": ["corrective_actions_is_missing"],
+            "reporting_delay_days": ["reporting_delay_days"],
+            "resolution_time_days": ["resolution_time_days"],
+            "status": ["status"],
+        }
+    )
+
+    # Comprehensive Timeline (strict date)
+    add_result(
+        "Comprehensive Timeline",
+        "/analytics/comprehensive-timeline",
+        inc,
+        {"date": ["occurrence_date"]}
+    )
+
+    # Audit & Inspection Tracker (needs start_date + audit_status)
+    add_result(
+        "Audit Inspection Tracker - Audits",
+        "/analytics/audit-inspection-tracker",
+        aud,
+        {"start_date": ["start_date"], "audit_status": ["audit_status", "status"]}
+    )
+    add_result(
+        "Audit Inspection Tracker - Inspections",
+        "/analytics/audit-inspection-tracker",
+        ins,
+        {"start_date": ["start_date"], "audit_status": ["audit_status", "status"]}
+    )
+
+    # Location Risk Treemap (strict)
+    add_result(
+        "Location Risk Treemap",
+        "/analytics/location-risk-treemap",
+        inc,
+        {"location": ["location"], "sublocation": ["sublocation", "sub_location", "location.1"]}
+    )
+
+    # Department Spider (strict department)
+    add_result(
+        "Department Spider",
+        "/analytics/department-spider",
+        inc,
+        {"department": ["department"]}
+    )
+
+    # Violation Analysis (hazard dataset)
+    add_result(
+        "Violation Analysis",
+        "/analytics/violation-analysis",
+        haz,
+        {"violation_type": ["violation_type_hazard_id"]}
+    )
+
+    # Cost Prediction Analysis (needs cost)
+    add_result(
+        "Cost Prediction Analysis",
+        "/analytics/cost-prediction-analysis",
+        inc,
+        {"estimated_cost_impact": ["estimated_cost_impact"]}
+    )
+
+    # Facility Layout Heatmap (location fields)
+    add_result(
+        "Facility Layout Heatmap - Incidents",
+        "/analytics/facility-layout-heatmap",
+        inc,
+        {"location": ["location", "sublocation", "location.1"]}
+    )
+    add_result(
+        "Facility Layout Heatmap - Hazards",
+        "/analytics/facility-layout-heatmap",
+        haz,
+        {"location": ["location", "sublocation", "location.1"]}
+    )
+
+    # Facility 3D Heatmap (location + severity/risk preferred)
+    add_result(
+        "Facility 3D Heatmap",
+        "/analytics/facility-3d-heatmap",
+        inc,
+        {"location": ["location", "sublocation", "location.1"], "sev_or_risk": ["severity_score", "risk_score"]}
+    )
+
+    # ---------------- Filters & Summary ----------------
+    # Filter Options (ensure dates and some dims exist)
+    add_result(
+        "Filter Options (Incident)",
+        "/analytics/filter-options",
+        inc,
+        {"date_any": ["occurrence_date", "reported_date", "entered_date", "start_date"], "department": ["department"], "location": ["location"], "status": ["status"]}
+    )
+    add_result(
+        "Filter Options (Hazard)",
+        "/analytics/filter-options",
+        haz,
+        {"date_any": ["occurrence_date", "reported_date", "entered_date", "start_date"], "violation_type": ["violation_type_hazard_id"]}
+    )
+    add_result(
+        "Filter Summary",
+        "/analytics/filter-summary",
+        inc,
+        {"date": ["occurrence_date", "reported_date", "entered_date"]}
+    )
+
+    # ---------------- Predictive Analytics ----------------
+    add_result(
+        "Incident Forecast",
+        "/analytics/predictive/incident-forecast",
+        inc,
+        {"date": ["occurrence_date", "date", "reported_date"]}
+    )
+    add_result(
+        "Risk Trend Projection - Incidents",
+        "/analytics/predictive/risk-trend-projection",
+        inc,
+        {"date": ["occurrence_date", "date"], "risk_or_sev": ["risk_score", "severity_score"]}
+    )
+    add_result(
+        "Risk Trend Projection - Hazards",
+        "/analytics/predictive/risk-trend-projection",
+        haz,
+        {"date": ["occurrence_date", "date"], "risk": ["risk_score"]}
+    )
+    add_result(
+        "Leading vs Lagging - Audits",
+        "/analytics/predictive/leading-vs-lagging",
+        aud,
+        {"status": ["audit_status", "status"]}
+    )
+    add_result(
+        "Leading vs Lagging - Incidents",
+        "/analytics/predictive/leading-vs-lagging",
+        inc,
+        {"type": ["incident_type", "category"], "severity_or_risk": ["severity_score", "risk_score"], "date": ["occurrence_date", "date", "reported_date"]}
+    )
+    add_result(
+        "Leading vs Lagging - Hazards",
+        "/analytics/predictive/leading-vs-lagging",
+        haz,
+        {"date": ["occurrence_date", "date", "reported_date"]}
+    )
+    add_result(
+        "Leading vs Lagging - Inspections",
+        "/analytics/predictive/leading-vs-lagging",
+        ins,
+        {"date": ["start_date", "date"]}
+    )
+    add_result(
+        "Observation Lag Time - Incidents",
+        "/analytics/predictive/observation-lag-time",
+        inc,
+        {"date": ["occurrence_date", "date"]}
+    )
+    add_result(
+        "Observation Lag Time - Hazards",
+        "/analytics/predictive/observation-lag-time",
+        haz,
+        {"date": ["occurrence_date", "date", "reported_date"]}
+    )
+
+    return JSONResponse(content=to_native_json({
+        "validated": results,
+        "summary": {
+            "ok": sum(1 for r in results if r["status"] == "ok"),
+            "with_issues": sum(1 for r in results if r["status"] != "ok"),
+            "timestamp": pd.Timestamp.utcnow().isoformat() + "Z",
+        }
     }))

@@ -399,7 +399,8 @@ async def data_incident_type_distribution(
     
     if df is None or df.empty:
         return JSONResponse(content={"labels": [], "series": []})
-    type_col = _resolve_column(df, ["incident type(s)", "category", "accident type"]) or df.columns[0]
+    # Include underscore variant to match documented column 'incident_type'
+    type_col = _resolve_column(df, ["incident_type", "incident type(s)", "category", "accident type"]) or df.columns[0]
     vc = df[type_col].astype(str).str.split(",").explode().str.strip()
     counts = vc.value_counts().head(20)
     return JSONResponse(content={
@@ -431,7 +432,8 @@ async def data_root_cause_pareto(
     
     if df is None or df.empty:
         return JSONResponse(content={"labels": [], "bars": [], "cum_pct": []})
-    rc_col = _resolve_column(df, ["root cause"]) or df.columns[0]
+    # Accept underscore variant if present
+    rc_col = _resolve_column(df, ["root_cause", "root cause"]) or df.columns[0]
     vc = df[rc_col].astype(str).str.split(",").explode().str.strip()
     counts = vc.value_counts()
     counts = counts[counts.index.notna()]
@@ -450,7 +452,18 @@ async def data_injury_severity_pyramid(dataset: str = Query("incident")):
     df = get_incident_df() if (dataset or "incident").lower() == "incident" else get_hazard_df()
     if df is None or df.empty:
         return JSONResponse(content={"labels": [], "series": []})
-    sev_col = _resolve_column(df, ["injury classification", "actual consequence (incident)", "relevant consequence (incident)"]) or df.columns[0]
+    # Support underscore and spaced variants
+    sev_col = _resolve_column(
+        df,
+        [
+            "injury_classification",
+            "injury classification",
+            "actual_consequence_incident",
+            "actual consequence (incident)",
+            "relevant_consequence_incident",
+            "relevant consequence (incident)",
+        ],
+    ) or df.columns[0]
     order = ["Near Miss", "First Aid", "Recordable", "Lost Time", "Fatality"]
     vc = df[sev_col].astype(str).value_counts()
     labels = []
@@ -514,8 +527,9 @@ async def data_consequence_gap(dataset: str = Query("incident")):
     df = get_incident_df() if (dataset or "incident").lower() == "incident" else get_hazard_df()
     if df is None or df.empty:
         return JSONResponse(content={"rows": [], "cols": [], "z": []})
-    actual = _resolve_column(df, ["actual consequence (incident)"]) or df.columns[0]
-    worst = _resolve_column(df, ["worst case consequence (incident)"]) or df.columns[0]
+    # Support underscore and spaced variants
+    actual = _resolve_column(df, ["actual_consequence_incident", "actual consequence (incident)"]) or df.columns[0]
+    worst = _resolve_column(df, ["worst_case_consequence_incident", "worst case consequence (incident)"]) or df.columns[0]
     ct = pd.crosstab(df[actual], df[worst])
     return JSONResponse(content={
         "rows": [str(i) for i in ct.index],
@@ -529,7 +543,8 @@ async def data_audit_status_distribution():
     df = get_audit_df()
     if df is None or df.empty:
         return JSONResponse(content={"labels": [], "series": []})
-    status_col = _resolve_column(df, ["audit status"]) or df.columns[0]
+    # Support both 'audit_status' and 'audit status'
+    status_col = _resolve_column(df, ["audit_status", "audit status"]) or df.columns[0]
     vc = df[status_col].astype(str).value_counts()
     return JSONResponse(content={
         "labels": vc.index.tolist(),
@@ -543,7 +558,8 @@ async def data_audit_rating_trend():
     if df is None or df.empty:
         return JSONResponse(content={"labels": [], "series": []})
     date_col = _resolve_column(df, ["start_date", "start date"]) or df.columns[0]
-    rating_col = _resolve_column(df, ["audit rating"]) or None
+    # Support both 'audit_rating' and 'audit rating'
+    rating_col = _resolve_column(df, ["audit_rating", "audit rating"]) or None
     if rating_col is None:
         return JSONResponse(content={"labels": [], "series": []})
     months = _to_month_period(df[date_col])
@@ -561,7 +577,8 @@ async def data_inspection_coverage():
     if df is None or df.empty:
         return JSONResponse(content={"labels": [], "series": []})
     date_col = _resolve_column(df, ["start_date", "start date"]) or df.columns[0]
-    status_col = _resolve_column(df, ["audit status"]) or df.columns[0]
+    # Support both 'audit_status' and 'audit status'
+    status_col = _resolve_column(df, ["audit_status", "audit status"]) or df.columns[0]
     months = _to_month_period(df[date_col])
     tmp = pd.DataFrame({"month": months, "status": df[status_col].astype(str)})
     pivot = tmp.pivot_table(index="month", columns="status", values="status", aggfunc="count").fillna(0).astype(int)
@@ -576,7 +593,8 @@ async def data_inspection_top_findings():
     df = get_inspection_df()
     if df is None or df.empty:
         return JSONResponse(content={"labels": [], "series": []})
-    cat_col = _resolve_column(df, ["checklist category", "finding"]) or df.columns[0]
+    # Prefer checklist_category, fallback to space variant, then finding
+    cat_col = _resolve_column(df, ["checklist_category", "checklist category", "finding"]) or df.columns[0]
     s = df[cat_col]
     # Drop NaN and trim
     s = s.dropna().astype(str).str.strip()
@@ -623,38 +641,24 @@ async def data_hazard_cost_trend():
     return await data_incident_cost_trend(dataset="hazard")
 
 
-@router.get("/data/ppe-violation-analysis")
-async def data_ppe_violation_analysis():
-    df = get_incident_df()
-    if df is None or df.empty:
-        return JSONResponse(content={"labels": [], "series": []})
-    viol_col = _resolve_column(df, ["violation type (incident)", "policy violation", "cardinal rule violation"]) or None
-    ppe_col = _resolve_column(df, ["ppe worn"]) or None
-    if viol_col is None or ppe_col is None:
-        return JSONResponse(content={"labels": [], "series": []})
-    # Normalize PPE worn values to Yes/No/Other
-    ppe = df[ppe_col].astype(str).str.strip().str.lower()
-    ppe_norm = ppe.where(~ppe.isin(["yes", "no"]) , ppe)
-    ppe_norm = ppe_norm.replace({"true": "yes", "false": "no"})
-    vt = df[viol_col].astype(str).str.split(',').explode().str.strip()
-    top_v = vt.value_counts().head(10).index.tolist()
-    # Build matrix violation x PPE
-    sub = pd.DataFrame({"violation": vt, "ppe": ppe_norm})
-    sub = sub[sub["violation"].isin(top_v)]
-    pivot = sub.pivot_table(index="violation", columns="ppe", values="violation", aggfunc="count").fillna(0).astype(int)
-    pivot = pivot.loc[top_v]
-    labels = pivot.index.tolist()
-    series = [{"name": str(col), "data": pivot[col].tolist()} for col in pivot.columns]
-    return JSONResponse(content={"labels": labels, "series": series})
-
-
 @router.get("/data/repeated-incidents")
 async def data_repeated_incidents():
     df = get_incident_df()
     if df is None or df.empty:
         return JSONResponse(content={"labels": [], "series": []})
-    rep_col = _resolve_column(df, ["repeated incident", "repeated event"]) or None
-    loc_col = _resolve_column(df, ["specific location of occurrence", "sub-location", "location"]) or None
+    # Support underscore and spaced variants
+    rep_col = _resolve_column(df, ["repeated_incident", "repeated incident", "repeated_event", "repeated event"]) or None
+    loc_col = _resolve_column(
+        df,
+        [
+            "specific_location_of_occurrence",
+            "specific location of occurrence",
+            "sub_location",
+            "sub-location",
+            "sublocation",
+            "location",
+        ],
+    ) or None
     if rep_col is None or loc_col is None:
         return JSONResponse(content={"labels": [], "series": []})
     mask = df[rep_col].astype(str).str.lower().isin(["yes", "true", "1"])
