@@ -15,6 +15,7 @@ import json
 import os
 import hashlib
 import asyncio
+import time
 import re
 import httpx
 import sqlite3
@@ -1647,6 +1648,11 @@ Database: epcl_vehs.db
             # Collect streaming response
             assistant_message = None
             content_buffer = ""
+            sent_answer_tokens = False
+            token_buffer = ""
+            last_flush_time = time.perf_counter()
+            min_flush_chars = 64
+            max_wait_seconds = 0.2
             tool_calls_buffer = {}
             reasoning_buffer = ""  # For reasoning tokens
             reasoning_details_buffer = []  # For reasoning_details array
@@ -1688,9 +1694,36 @@ Database: epcl_vehs.db
                 # Accumulate assistant content silently; do not emit 'thinking_token'
                 if delta.content:
                     content_buffer += delta.content
+                    token_buffer += delta.content
+                    now = time.perf_counter()
+                    should_flush = False
+                    if "\n" in token_buffer:
+                        should_flush = True
+                    elif len(token_buffer) >= min_flush_chars:
+                        should_flush = True
+                    elif token_buffer[-1:] in ('.', '!', '?') and len(token_buffer) >= 20:
+                        should_flush = True
+                    elif (now - last_flush_time) >= max_wait_seconds and len(token_buffer) >= 1:
+                        should_flush = True
+                    if should_flush:
+                        yield {
+                            "type": "answer",
+                            "content": token_buffer
+                        }
+                        sent_answer_tokens = True
+                        token_buffer = ""
+                        last_flush_time = now
                 
                 # Get finish reason
                 if chunk.choices[0].finish_reason:
+                    # Flush any remaining buffered answer tokens
+                    if token_buffer:
+                        yield {
+                            "type": "answer",
+                            "content": token_buffer
+                        }
+                        sent_answer_tokens = True
+                        token_buffer = ""
                     # Build proper message dict for API
                     assistant_message_dict = {
                         "role": "assistant",
@@ -1917,23 +1950,33 @@ Database: epcl_vehs.db
                 # AI provided final answer (content was accumulated silently)
                 final_answer = content_buffer
                 
-                # ENHANCEMENT: Ensure response is well-formatted
-                if final_answer:
-                    formatted_answer = enhance_response_formatting(final_answer)
+                # If we already streamed tokens, avoid duplicating the answer
+                if sent_answer_tokens:
+                    yield {
+                        "type": "complete",
+                        "data": {
+                            "iterations": iteration,
+                            "tools_used": len([msg for msg in messages if msg.get("role") == "tool"])
+                        }
+                    }
+                else:
+                    # ENHANCEMENT: Ensure response is well-formatted
+                    if final_answer:
+                        formatted_answer = enhance_response_formatting(final_answer)
+                        
+                        yield {
+                            "type": "answer_complete",
+                            "content": formatted_answer
+                        }
                     
                     yield {
-                        "type": "answer_complete",
-                        "content": formatted_answer
+                        "type": "complete",
+                        "data": {
+                            "answer": formatted_answer if final_answer else "",
+                            "iterations": iteration,
+                            "tools_used": len([msg for msg in messages if msg.get("role") == "tool"])
+                        }
                     }
-                
-                yield {
-                    "type": "complete",
-                    "data": {
-                        "answer": formatted_answer if final_answer else "",
-                        "iterations": iteration,
-                        "tools_used": len([msg for msg in messages if msg.get("role") == "tool"])
-                    }
-                }
                 
                 break
         

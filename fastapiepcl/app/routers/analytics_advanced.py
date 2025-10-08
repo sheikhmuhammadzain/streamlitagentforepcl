@@ -321,6 +321,199 @@ async def heinrich_safety_pyramid(
     }))
 
 
+@router.get("/heinrich-pyramid-breakdown")
+async def heinrich_pyramid_breakdown(
+    start_date: Optional[str] = Query(None, description="Filter start date (YYYY-MM-DD)"),
+    end_date: Optional[str] = Query(None, description="Filter end date (YYYY-MM-DD)"),
+):
+    """
+    Detailed breakdown of Heinrich's Pyramid by Department and Location.
+    
+    Shows contribution of each department and location to pyramid layers:
+    - Fatality (Incident sheet: severity_score >= 4-5 OR consequence contains 'fatal')
+    - Lost Workday Cases (Incident sheet: severity_score >= 3)
+    - Recordable Injuries (Incident sheet: severity_score >= 2)
+    - Near Misses (Hazard ID sheet + Incident sheet with 'near miss' type)
+    - At-Risk Behaviors (Audit + Inspection sheets with findings)
+    
+    Data Sources:
+    - Incidents: Incident sheet
+    - Hazards: Hazard ID sheet
+    - Audits: Audit Findings sheet
+    - Inspections: Inspection Findings sheet
+    """
+    inc_df = get_incident_df()
+    haz_df = get_hazard_df()
+    aud_df = get_audit_df()
+    insp_df = get_inspection_df()
+    
+    # Apply date filters
+    inc_df = _apply_filters(inc_df, start_date, end_date, None, None)
+    haz_df = _apply_filters(haz_df, start_date, end_date, None, None)
+    
+    breakdown = {
+        "by_department": [],
+        "by_location": [],
+        "data_sources": {
+            "fatalities": "Incident sheet (severity_score >= 4-5 OR actual/worst_consequence contains 'fatal')",
+            "lost_workday_cases": "Incident sheet (severity_score >= 3, excluding fatalities)",
+            "recordable_injuries": "Incident sheet (severity_score >= 2, excluding LTI and fatalities)",
+            "near_misses": "Hazard ID sheet + Incident sheet (incident_type contains 'near miss')",
+            "at_risk_behaviors": "Audit Findings sheet + Inspection Findings sheet (non-null findings)"
+        }
+    }
+    
+    # Department breakdown
+    if inc_df is not None and not inc_df.empty:
+        dept_col = _resolve_column(inc_df, ["department", "sub_department"])
+        sev_col = _resolve_column(inc_df, ["severity_score", "severity"])
+        act_cons = _resolve_column(inc_df, ["actual_consequence_incident"])
+        worst_cons = _resolve_column(inc_df, ["worst_case_consequence_incident"])
+        type_col = _resolve_column(inc_df, ["incident_type", "category"])
+        
+        if dept_col and dept_col in inc_df.columns:
+            for dept in inc_df[dept_col].dropna().unique():
+                dept_inc = inc_df[inc_df[dept_col] == dept]
+                
+                # Calculate layers for this department
+                fatalities = 0
+                lost_workday = 0
+                recordable = 0
+                
+                if sev_col and sev_col in dept_inc.columns:
+                    sev_vals = pd.to_numeric(dept_inc[sev_col], errors="coerce")
+                    
+                    # Fatalities
+                    fat_mask = pd.Series([False] * len(dept_inc))
+                    if act_cons and act_cons in dept_inc.columns:
+                        fat_mask |= dept_inc[act_cons].astype(str).str.contains("fatal", case=False, na=False)
+                    if worst_cons and worst_cons in dept_inc.columns:
+                        fat_mask |= dept_inc[worst_cons].astype(str).str.contains("fatal", case=False, na=False)
+                    max_val = sev_vals.max(skipna=True)
+                    if pd.notna(max_val):
+                        thr = 5 if max_val >= 5 else 4
+                        fat_mask |= sev_vals >= thr
+                    fatalities = int(fat_mask.sum())
+                    
+                    # Lost Workday Cases
+                    lti_mask = (sev_vals >= 3) & ~fat_mask
+                    lost_workday = int(lti_mask.sum())
+                    
+                    # Recordable Injuries
+                    rec_mask = (sev_vals >= 2) & ~(lti_mask | fat_mask)
+                    recordable = int(rec_mask.sum())
+                
+                # Near misses from incidents
+                near_miss_inc = 0
+                if type_col and type_col in dept_inc.columns:
+                    near_miss_inc = int(dept_inc[type_col].astype(str).str.contains("near miss|near-miss", case=False, na=False).sum())
+                
+                # Near misses from hazards
+                near_miss_haz = 0
+                if haz_df is not None and not haz_df.empty:
+                    haz_dept_col = _resolve_column(haz_df, ["department", "sub_department"])
+                    if haz_dept_col and haz_dept_col in haz_df.columns:
+                        near_miss_haz = int((haz_df[haz_dept_col] == dept).sum())
+                
+                # At-risk behaviors from audits
+                at_risk_aud = 0
+                if aud_df is not None and not aud_df.empty:
+                    aud_loc_col = _resolve_column(aud_df, ["finding_location", "location", "audit_location"])
+                    if aud_loc_col and aud_loc_col in aud_df.columns:
+                        at_risk_aud = int(aud_df[aud_loc_col].astype(str).str.contains(str(dept), case=False, na=False).sum())
+                
+                # At-risk behaviors from inspections
+                at_risk_insp = 0
+                if insp_df is not None and not insp_df.empty:
+                    insp_loc_col = _resolve_column(insp_df, ["finding_location", "location", "audit_location"])
+                    if insp_loc_col and insp_loc_col in insp_df.columns:
+                        at_risk_insp = int(insp_df[insp_loc_col].astype(str).str.contains(str(dept), case=False, na=False).sum())
+                
+                breakdown["by_department"].append({
+                    "department": str(dept),
+                    "fatalities": fatalities,
+                    "lost_workday_cases": lost_workday,
+                    "recordable_injuries": recordable,
+                    "near_misses": near_miss_inc + near_miss_haz,
+                    "at_risk_behaviors": at_risk_aud + at_risk_insp,
+                    "total_incidents": int(len(dept_inc))
+                })
+    
+    # Location breakdown
+    if inc_df is not None and not inc_df.empty:
+        loc_col = _resolve_column(inc_df, ["location", "sublocation", "location.1"])
+        
+        if loc_col and loc_col in inc_df.columns:
+            for loc in inc_df[loc_col].dropna().unique():
+                loc_inc = inc_df[inc_df[loc_col] == loc]
+                
+                # Calculate layers for this location
+                fatalities = 0
+                lost_workday = 0
+                recordable = 0
+                
+                if sev_col and sev_col in loc_inc.columns:
+                    sev_vals = pd.to_numeric(loc_inc[sev_col], errors="coerce")
+                    
+                    # Fatalities
+                    fat_mask = pd.Series([False] * len(loc_inc))
+                    if act_cons and act_cons in loc_inc.columns:
+                        fat_mask |= loc_inc[act_cons].astype(str).str.contains("fatal", case=False, na=False)
+                    if worst_cons and worst_cons in loc_inc.columns:
+                        fat_mask |= loc_inc[worst_cons].astype(str).str.contains("fatal", case=False, na=False)
+                    max_val = sev_vals.max(skipna=True)
+                    if pd.notna(max_val):
+                        thr = 5 if max_val >= 5 else 4
+                        fat_mask |= sev_vals >= thr
+                    fatalities = int(fat_mask.sum())
+                    
+                    # Lost Workday Cases
+                    lti_mask = (sev_vals >= 3) & ~fat_mask
+                    lost_workday = int(lti_mask.sum())
+                    
+                    # Recordable Injuries
+                    rec_mask = (sev_vals >= 2) & ~(lti_mask | fat_mask)
+                    recordable = int(rec_mask.sum())
+                
+                # Near misses from incidents
+                near_miss_inc = 0
+                if type_col and type_col in loc_inc.columns:
+                    near_miss_inc = int(loc_inc[type_col].astype(str).str.contains("near miss|near-miss", case=False, na=False).sum())
+                
+                # Near misses from hazards
+                near_miss_haz = 0
+                if haz_df is not None and not haz_df.empty:
+                    haz_loc_col = _resolve_column(haz_df, ["location", "sublocation", "location.1"])
+                    if haz_loc_col and haz_loc_col in haz_df.columns:
+                        near_miss_haz = int((haz_df[haz_loc_col] == loc).sum())
+                
+                # At-risk behaviors from audits
+                at_risk_aud = 0
+                if aud_df is not None and not aud_df.empty:
+                    aud_loc_col = _resolve_column(aud_df, ["location", "finding_location", "audit_location"])
+                    if aud_loc_col and aud_loc_col in aud_df.columns:
+                        at_risk_aud = int((aud_df[aud_loc_col] == loc).sum())
+                
+                # At-risk behaviors from inspections
+                at_risk_insp = 0
+                if insp_df is not None and not insp_df.empty:
+                    insp_loc_col = _resolve_column(insp_df, ["location", "finding_location", "audit_location"])
+                    if insp_loc_col and insp_loc_col in insp_df.columns:
+                        at_risk_insp = int((insp_df[insp_loc_col] == loc).sum())
+                
+                breakdown["by_location"].append({
+                    "location": str(loc),
+                    "fatalities": fatalities,
+                    "lost_workday_cases": lost_workday,
+                    "recordable_injuries": recordable,
+                    "near_misses": near_miss_inc + near_miss_haz,
+                    "at_risk_behaviors": at_risk_aud + at_risk_insp,
+                    "total_incidents": int(len(loc_inc))
+                })
+    
+    return JSONResponse(content=to_native_json(breakdown))
+
+
 # ======================= SITE SAFETY INDEX =======================
 
 @router.get("/site-safety-index")

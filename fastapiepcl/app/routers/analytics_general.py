@@ -434,9 +434,11 @@ async def data_root_cause_pareto(
         return JSONResponse(content={"labels": [], "bars": [], "cum_pct": []})
     # Accept underscore variant if present
     rc_col = _resolve_column(df, ["root_cause", "root cause"]) or df.columns[0]
-    vc = df[rc_col].astype(str).str.split(",").explode().str.strip()
+    vc = df[rc_col].dropna().astype(str).str.split(",").explode().str.strip()
+    # Remove empty strings and placeholder values
+    vc = vc[vc != ""]
+    vc = vc[~vc.str.contains("nan|null|none|n/a", case=False, na=False)]
     counts = vc.value_counts()
-    counts = counts[counts.index.notna()]
     counts = counts.head(15)
     total = counts.sum() if counts.sum() > 0 else 1
     cum = counts.cumsum() / total * 100
@@ -593,28 +595,186 @@ async def data_inspection_top_findings():
     df = get_inspection_df()
     if df is None or df.empty:
         return JSONResponse(content={"labels": [], "series": []})
-    # Prefer checklist_category, fallback to space variant, then finding
-    cat_col = _resolve_column(df, ["checklist_category", "checklist category", "finding"]) or df.columns[0]
-    s = df[cat_col]
-    # Drop NaN and trim
-    s = s.dropna().astype(str).str.strip()
-    # Remove placeholders: NaN/N.A forms and generic 'no ...' statements
-    na_pat = re.compile(r"^(n/?a|nan|null|none|not\s*applicable)(\s*;\s*(n/?a|nan|null|none|not\s*applicable))*$", re.IGNORECASE)
-    no_pat = re.compile(r"^(no(\s+|$)|no\s+(finding|findings|observation|observations|deficien(?:cy|cies)|issue|issues|recommendation(?:s)?)(\b|\s|$))", re.IGNORECASE)
-    def _keep(val: str) -> bool:
-        v = val.strip()
-        if not v:
-            return False
-        if na_pat.match(v):
-            return False
-        if no_pat.search(v):
-            return False
-        return True
-    s = s[s.map(_keep)]
-    vc = s.value_counts().head(20)
+    # Prefer granular finding/observation text; fallback to checklist category
+    col_candidates = [
+        "finding", "findings", "observation", "observations", "non_conformance", "non conformance",
+        "issue", "issues", "remark", "remarks", "description",
+        "checklist_category", "checklist category"
+    ]
+    col = _resolve_column(df, col_candidates) or df.columns[0]
+
+    series = df[col].dropna().astype(str)
+
+    # Normalize whitespace and strip punctuation
+    series = series.str.replace(r"\s+", " ", regex=True).str.strip(" \t\r\n-–•·;:,.")
+
+    # Remove placeholders and generic negations
+    na_pat = re.compile(r"^(n/?a|na|nan|null|none|not\s*applicable)$", re.IGNORECASE)
+    no_pat = re.compile(r"^no(\s+|$)|no\s+(finding|findings|observation|observations|deficien(?:cy|cies)|issue|issues|recommendation(?:s)?)$", re.IGNORECASE)
+    mask = (~series.str.match(na_pat)) & (~series.str.match(no_pat)) & (series.str.len() > 0)
+    series = series[mask]
+
+    # If we are using a category-like column, split on delimiters and explode to avoid concatenated labels
+    is_category_like = col.lower().strip() in {"checklist_category", "checklist category"}
+    if is_category_like:
+        # Split on ';' or ',' and explode
+        series = series.str.split(r"[;,]").explode().astype(str)
+        # Re-normalize tokens
+        series = series.str.replace(r"\s+", " ", regex=True).str.strip(" \t\r\n-–•·;:,.")
+        # Drop empty after split
+        series = series[series.str.len() > 0]
+
+    # Canonicalize casing for consistent aggregation
+    tokens = series.str.strip().str.replace(r"\s+", " ", regex=True)
+
+    # Build value counts and take top 20
+    vc = tokens.value_counts().head(20)
+    labels = [str(x) for x in vc.index.tolist()]
+    counts = vc.values.astype(int).tolist()
+
     return JSONResponse(content={
-        "labels": vc.index.tolist(),
-        "series": [{"name": "Count", "data": vc.values.astype(int).tolist()}],
+        "labels": labels,
+        "series": [{"name": "Count", "data": counts}],
+    })
+
+
+@router.get("/data/audit-top-findings")
+async def data_audit_top_findings():
+    df = get_audit_df()
+    if df is None or df.empty:
+        return JSONResponse(content={"labels": [], "series": []})
+    # Prefer granular finding/observation text; fallback to checklist category
+    col_candidates = [
+        "finding", "findings", "observation", "observations", "non_conformance", "non conformance",
+        "issue", "issues", "remark", "remarks", "description",
+        "checklist_category", "checklist category"
+    ]
+    col = _resolve_column(df, col_candidates) or df.columns[0]
+
+    series = df[col].dropna().astype(str)
+
+    # Normalize whitespace and strip punctuation
+    series = series.str.replace(r"\s+", " ", regex=True).str.strip(" \t\r\n-–•·;:,.")
+
+    # Remove placeholders and generic negations
+    na_pat = re.compile(r"^(n/?a|na|nan|null|none|not\s*applicable)$", re.IGNORECASE)
+    no_pat = re.compile(r"^no(\s+|$)|no\s+(finding|findings|observation|observations|deficien(?:cy|cies)|issue|issues|recommendation(?:s)?)$", re.IGNORECASE)
+    mask = (~series.str.match(na_pat)) & (~series.str.match(no_pat)) & (series.str.len() > 0)
+    series = series[mask]
+
+    # If we are using a category-like column, split on delimiters and explode to avoid concatenated labels
+    is_category_like = col.lower().strip() in {"checklist_category", "checklist category"}
+    if is_category_like:
+        # Split on ';' or ',' and explode
+        series = series.str.split(r"[;,]").explode().astype(str)
+        # Re-normalize tokens
+        series = series.str.replace(r"\s+", " ", regex=True).str.strip(" \t\r\n-–•·;:,.")
+        # Drop empty after split
+        series = series[series.str.len() > 0]
+
+    # Canonicalize casing for consistent aggregation
+    tokens = series.str.strip().str.replace(r"\s+", " ", regex=True)
+
+    # Build value counts and take top 20
+    vc = tokens.value_counts().head(20)
+    labels = [str(x) for x in vc.index.tolist()]
+    counts = vc.values.astype(int).tolist()
+
+    return JSONResponse(content={
+        "labels": labels,
+        "series": [{"name": "Count", "data": counts}],
+    })
+
+
+@router.get("/data/incident-top-findings")
+async def data_incident_top_findings():
+    df = get_incident_df()
+    if df is None or df.empty:
+        return JSONResponse(content={"labels": [], "series": []})
+    # For incidents, use description, conclusion, or root_cause
+    col_candidates = [
+        "description", "conclusion", "root_cause", "incident_type"
+    ]
+    col = _resolve_column(df, col_candidates) or df.columns[0]
+
+    series = df[col].dropna().astype(str)
+
+    # Normalize whitespace and strip punctuation
+    series = series.str.replace(r"\s+", " ", regex=True).str.strip(" \t\r\n-–•·;:,.")
+
+    # Remove placeholders and generic negations
+    na_pat = re.compile(r"^(n/?a|na|nan|null|none|not\s*applicable)$", re.IGNORECASE)
+    no_pat = re.compile(r"^no(\s+|$)|no\s+(finding|findings|observation|observations|deficien(?:cy|cies)|issue|issues|recommendation(?:s)?)$", re.IGNORECASE)
+    mask = (~series.str.match(na_pat)) & (~series.str.match(no_pat)) & (series.str.len() > 0)
+    series = series[mask]
+
+    # If we are using a category-like column, split on delimiters and explode to avoid concatenated labels
+    is_category_like = col.lower().strip() in {"checklist_category", "checklist category"}
+    if is_category_like:
+        # Split on ';' or ',' and explode
+        series = series.str.split(r"[;,]").explode().astype(str)
+        # Re-normalize tokens
+        series = series.str.replace(r"\s+", " ", regex=True).str.strip(" \t\r\n-–•·;:,.")
+        # Drop empty after split
+        series = series[series.str.len() > 0]
+
+    # Canonicalize casing for consistent aggregation
+    tokens = series.str.strip().str.replace(r"\s+", " ", regex=True)
+
+    # Build value counts and take top 20
+    vc = tokens.value_counts().head(20)
+    labels = [str(x) for x in vc.index.tolist()]
+    counts = vc.values.astype(int).tolist()
+
+    return JSONResponse(content={
+        "labels": labels,
+        "series": [{"name": "Count", "data": counts}],
+    })
+
+
+@router.get("/data/hazard-top-findings")
+async def data_hazard_top_findings():
+    df = get_hazard_df()
+    if df is None or df.empty:
+        return JSONResponse(content={"labels": [], "series": []})
+    # For hazards, use description or violation_type
+    col_candidates = [
+        "description", "violation_type_hazard_id", "incident_type"
+    ]
+    col = _resolve_column(df, col_candidates) or df.columns[0]
+
+    series = df[col].dropna().astype(str)
+
+    # Normalize whitespace and strip punctuation
+    series = series.str.replace(r"\s+", " ", regex=True).str.strip(" \t\r\n-–•·;:,.")
+
+    # Remove placeholders and generic negations
+    na_pat = re.compile(r"^(n/?a|na|nan|null|none|not\s*applicable)$", re.IGNORECASE)
+    no_pat = re.compile(r"^no(\s+|$)|no\s+(finding|findings|observation|observations|deficien(?:cy|cies)|issue|issues|recommendation(?:s)?)$", re.IGNORECASE)
+    mask = (~series.str.match(na_pat)) & (~series.str.match(no_pat)) & (series.str.len() > 0)
+    series = series[mask]
+
+    # If we are using a category-like column, split on delimiters and explode to avoid concatenated labels
+    is_category_like = col.lower().strip() in {"checklist_category", "checklist category"}
+    if is_category_like:
+        # Split on ';' or ',' and explode
+        series = series.str.split(r"[;,]").explode().astype(str)
+        # Re-normalize tokens
+        series = series.str.replace(r"\s+", " ", regex=True).str.strip(" \t\r\n-–•·;:,.")
+        # Drop empty after split
+        series = series[series.str.len() > 0]
+
+    # Canonicalize casing for consistent aggregation
+    tokens = series.str.strip().str.replace(r"\s+", " ", regex=True)
+
+    # Build value counts and take top 20
+    vc = tokens.value_counts().head(20)
+    labels = [str(x) for x in vc.index.tolist()]
+    counts = vc.values.astype(int).tolist()
+
+    return JSONResponse(content={
+        "labels": labels,
+        "series": [{"name": "Count", "data": counts}],
     })
 
 

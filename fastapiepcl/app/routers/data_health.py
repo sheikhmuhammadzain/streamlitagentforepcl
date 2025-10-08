@@ -1178,6 +1178,24 @@ async def validate_charts():
             "category": ["checklist_category", "checklist category", "finding"]
         }
     )
+    add_result(
+        "Audit Top Findings", "/analytics/data/audit-top-findings",
+        aud, {
+            "category": ["checklist_category", "checklist category", "finding"]
+        }
+    )
+    add_result(
+        "Incident Top Findings", "/analytics/data/incident-top-findings",
+        inc, {
+            "category": ["description", "conclusion", "root_cause", "incident_type"]
+        }
+    )
+    add_result(
+        "Hazard Top Findings", "/analytics/data/hazard-top-findings",
+        haz, {
+            "category": ["description", "violation_type_hazard_id", "incident_type"]
+        }
+    )
 
     # Advanced analytics validations
     # Heinrich Pyramid
@@ -1206,6 +1224,27 @@ async def validate_charts():
         "/analytics/advanced/heinrich-pyramid",
         ins,
         {"finding": ["finding", "findings"]},
+    )
+    add_result(
+        "Heinrich Pyramid Breakdown - Incidents",
+        "/analytics/advanced/heinrich-pyramid-breakdown",
+        inc,
+        {
+            "department": ["department", "sub_department"],
+            "location": ["location", "sublocation", "location.1"],
+            "severity": ["severity_score", "severity"],
+            "consequence": ["actual_consequence_incident", "worst_case_consequence_incident"],
+            "type": ["incident_type", "category"]
+        },
+    )
+    add_result(
+        "Heinrich Pyramid Breakdown - Hazards",
+        "/analytics/advanced/heinrich-pyramid-breakdown",
+        haz,
+        {
+            "department": ["department", "sub_department"],
+            "location": ["location", "sublocation", "location.1"]
+        },
     )
 
     # Site Safety Index
