@@ -6,8 +6,8 @@ from ..models.schemas import ConversionRequest, PlotlyFigureResponse, ChartInsig
 from ..services.excel import payload_to_df, get_incident_df, get_hazard_df
 from ..services.json_utils import to_native_json
 from ..services.agent import ask_openai
+from ..analytics.hazard_incident import HazardIncidentAnalyzer
 
-from analytics.hazard_incident import HazardIncidentAnalyzer
 import pandas as pd
 
 
@@ -476,7 +476,7 @@ async def prevention_effectiveness_insights():
 
 @router.get("/metrics-gauge", response_model=PlotlyFigureResponse)
 async def metrics_gauge_auto():
-    from analytics.hazard_incident import create_conversion_metrics_card
+    from ..analytics.hazard_incident import create_conversion_metrics_card
     workbook = {
         'Incidents': get_incident_df(),
         'Hazards': get_hazard_df(),

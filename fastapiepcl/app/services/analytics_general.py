@@ -4,11 +4,11 @@ from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 
-from analytics.wordclouds import (
+from ..analytics.wordclouds import (
     get_incident_hazard_department_words,
     create_modern_word_cloud_html,
 )
-from analytics.maps import add_coordinates_to_df, build_combined_map_html
+from ..analytics.maps import add_coordinates_to_df, build_combined_map_html
 
 
 def build_department_wordclouds(
